@@ -1,0 +1,44 @@
+{
+  "name": "opencode-feishu",
+  "version": "0.1.0",
+  "description": "飞书机器人连接 OpenCode，通过飞书对话执行代码任务",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "opencode-feishu": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.56.1",
+    "@opencode-ai/sdk": "^1.1.36",
+    "dotenv": "^17.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "feishu",
+    "lark",
+    "飞书",
+    "飞书机器人",
+    "ai",
+    "chatbot"
+  ],
+  "license": "MIT"
+}

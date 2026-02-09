@@ -1,0 +1,16 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+dist
+node_modules
+
+.idea
+
+# OpenMemory - IDE/Assistant specific rules
+.cursor
+
+.specify
+.cursor\rules\openmemory.mdc
+/openmemory.md
