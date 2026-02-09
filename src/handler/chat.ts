@@ -34,10 +34,16 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   const model = getModel(ctx) ?? config.opencode.model;
   const agent = getAgent?.(ctx) ?? config.opencode.agent;
 
+  // Build prompt content with sender identity for group chats
+  let promptContent = content;
+  if (chatType === "group" && senderId) {
+    promptContent = `[${senderId}]: ${content}`;
+  }
+
   // 静默监听模式：消息发给 OpenCode 作为上下文，但不触发 AI 回复、不在飞书回复
   if (!shouldReply) {
     try {
-      await opencodeClient.sendPrompt(session.id, content, { model, agent, noReply: true });
+      await opencodeClient.sendPrompt(session.id, promptContent, { model, agent, noReply: true });
     } catch (err) {
       log("warn", "静默转发失败", {
         error: err instanceof Error ? err.message : String(err),
@@ -67,7 +73,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
   try {
 
-    await opencodeClient.sendPrompt(session.id, content, { model, agent });
+    await opencodeClient.sendPrompt(session.id, promptContent, { model, agent });
     sessionIdForCleanup = session.id;
     if (placeholderId && regPending) {
       regPending(session.id, { chatId, placeholderId, feishuClient });

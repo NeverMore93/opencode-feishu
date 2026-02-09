@@ -115,7 +115,7 @@ flowchart LR
 
 | 变量 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `OPENCODE_BASE_URL` | string | `http://localhost:4096` | OpenCode 服务地址 |
+| `OPENCODE_BASE_URL` | string | `http://localhost:4096` | OpenCode 服务地址（仅非标准部署时需要配置） |
 | `OPENCODE_DIRECTORY` | string | - | OpenCode 工作目录（可选） |
 | `OPENCODE_MODEL` | string | - | 默认模型，格式 `provider/model` |
 | `OPENCODE_AGENT` | string | - | 默认 Agent，如 `build`、`plan`、`general` |
@@ -303,6 +303,16 @@ npm install /path/to/opencode-feishu-0.1.0.tgz
 | bot 首次入群 | 历史消息 | **是** | **否** |
 
 若希望群内每条消息都触发回复，可设置 `BOT_GROUP_FILTER=false`。
+
+### 群聊发送者身份
+
+发往 OpenCode 的群聊消息会带上发送者身份，便于 AI 区分是谁在说话：每条消息文本前会加上 `[open_id]` 前缀（飞书用户的 `open_id`），例如：
+
+```
+[ou_xxxxxxxxxxxx]: 帮我看一下这个 bug
+```
+
+单聊不添加此前缀；历史摄入中的消息同样按 `[open_id]` 或 `[Bot]` 标识。
 
 ---
 
