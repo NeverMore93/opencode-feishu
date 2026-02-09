@@ -1,7 +1,9 @@
 /**
- * OpenCode SDK 封装：会话、消息、模型、Agent、健康检查
+ * OpenCode SDK 封装：会话、消息、健康检查
  */
 import type { OpenCodeConfig } from "../types.js";
+
+const OPENCODE_BASE_URL = "http://localhost:4096";
 
 export interface Session {
   id: string;
@@ -14,20 +16,6 @@ export interface Session {
 export interface Message {
   info?: { id?: string; role?: string; [key: string]: unknown };
   parts?: Array<{ type?: string; text?: string; [key: string]: unknown }>;
-  [key: string]: unknown;
-}
-
-export interface Provider {
-  id: string;
-  name?: string;
-  models?: Array<{ id: string; name?: string }> | Record<string, { id: string; name?: string }>;
-  [key: string]: unknown;
-}
-
-export interface Agent {
-  id?: string;
-  name?: string;
-  description?: string;
   [key: string]: unknown;
 }
 
@@ -55,14 +43,8 @@ async function ensureClients(baseUrl: string): Promise<{ main: unknown; health: 
   return initPromise;
 }
 
-function parseModel(modelStr: string): { providerID: string; modelID: string } {
-  const parts = modelStr.split("/");
-  if (parts.length !== 2) throw new Error("模型格式应为 provider/model");
-  return { providerID: parts[0], modelID: parts[1] };
-}
-
 /**
- * OpenCode 客户端：封装会话、提示、模型、Agent、健康检查
+ * OpenCode 客户端：封装会话、提示、健康检查
  */
 export class OpenCodeClient {
   constructor(private config: OpenCodeConfig) {}
@@ -75,20 +57,18 @@ export class OpenCodeClient {
       delete: (opts: { path: { id: string } }) => Promise<void>;
       prompt: (opts: {
         path: { id: string };
-        body: { model?: { providerID: string; modelID: string }; agent?: string; parts: Array<{ type: string; text?: string }>; noReply?: boolean };
+        body: { parts: Array<{ type: string; text?: string }>; noReply?: boolean };
       }) => Promise<{ info?: { id?: string }; [key: string]: unknown }>;
       messages: (opts: { path: { id: string } }) => Promise<{ data: Message[] }>;
     };
-    config: { providers: () => Promise<{ data: { providers?: Provider[] } }> };
-    app: { agents: () => Promise<{ data: Agent[] }> };
     event: { subscribe: () => Promise<{ stream: AsyncIterable<unknown> }> };
   }> {
-    const { main } = await ensureClients(this.config.baseUrl);
+    const { main } = await ensureClients(OPENCODE_BASE_URL);
     return main as never;
   }
 
   private async getHealthClient(): Promise<{ global: { health: () => Promise<{ data: HealthInfo }> } }> {
-    const { health } = await ensureClients(this.config.baseUrl);
+    const { health } = await ensureClients(OPENCODE_BASE_URL);
     return health as never;
   }
 
@@ -98,12 +78,9 @@ export class OpenCodeClient {
     return Array.isArray(data) ? data : [];
   }
 
-  async createSession(title: string, directory?: string): Promise<Session> {
+  async createSession(title: string): Promise<Session> {
     const client = await this.getClient();
-    const { data } = await client.session.create({
-      body: { title },
-      query: directory ? { directory } : undefined,
-    });
+    const { data } = await client.session.create({ body: { title } });
     if (!data?.id) throw new Error("创建会话失败");
     return data;
   }
@@ -122,19 +99,15 @@ export class OpenCodeClient {
   async sendPrompt(
     sessionId: string,
     content: string,
-    options?: { model?: string; agent?: string; noReply?: boolean }
+    options?: { noReply?: boolean }
   ): Promise<{ messageId?: string }> {
     const client = await this.getClient();
     const body: {
-      model?: { providerID: string; modelID: string };
-      agent?: string;
       parts: Array<{ type: string; text?: string }>;
       noReply?: boolean;
     } = {
       parts: [{ type: "text", text: content }],
     };
-    if (options?.model) body.model = parseModel(options.model);
-    if (options?.agent) body.agent = options.agent;
     if (options?.noReply) body.noReply = true;
     const result = await client.session.prompt({
       path: { id: sessionId },
@@ -146,19 +119,6 @@ export class OpenCodeClient {
   async getMessages(sessionId: string): Promise<Message[]> {
     const client = await this.getClient();
     const { data } = await client.session.messages({ path: { id: sessionId } });
-    return Array.isArray(data) ? data : [];
-  }
-
-  async listProviders(): Promise<Provider[]> {
-    const client = await this.getClient();
-    const { data } = await client.config.providers();
-    const providers = data?.providers;
-    return Array.isArray(providers) ? providers : [];
-  }
-
-  async listAgents(): Promise<Agent[]> {
-    const client = await this.getClient();
-    const { data } = await client.app.agents();
     return Array.isArray(data) ? data : [];
   }
 

@@ -3,7 +3,6 @@ import os from "os";
 import path from "path";
 import type { Config, LoadConfigResult, ConfigSource } from "./types.js";
 
-const DEFAULT_OPENCODE_BASE_URL = "http://localhost:4096";
 const DEFAULT_TIMEOUT = 120_000;
 const DEFAULT_THINKING_DELAY = 2500;
 const DEFAULT_STREAM_INTERVAL = 1000;
@@ -40,10 +39,6 @@ function readEnvConfig(): Partial<Record<string, unknown>> {
       appSecret: process.env.FEISHU_APP_SECRET,
     },
     opencode: {
-      baseUrl: process.env.OPENCODE_BASE_URL,
-      directory: process.env.OPENCODE_DIRECTORY,
-      model: process.env.OPENCODE_MODEL,
-      agent: process.env.OPENCODE_AGENT,
       timeout: process.env.OPENCODE_TIMEOUT
         ? parseInt(process.env.OPENCODE_TIMEOUT, 10)
         : undefined,
@@ -57,9 +52,6 @@ function readEnvConfig(): Partial<Record<string, unknown>> {
         : undefined,
       streamInterval: process.env.BOT_STREAM_INTERVAL
         ? parseInt(process.env.BOT_STREAM_INTERVAL, 10)
-        : undefined,
-      groupFilter: process.env.BOT_GROUP_FILTER
-        ? process.env.BOT_GROUP_FILTER === "true"
         : undefined,
     },
   };
@@ -121,8 +113,7 @@ function resolveConfig(options: { directory?: string; configPath?: string }): {
   const envData = readEnvConfig();
   const hasEnv =
     getNested(envData, "feishu")?.appId ||
-    getNested(envData, "feishu")?.appSecret ||
-    getNested(envData, "opencode")?.baseUrl;
+    getNested(envData, "feishu")?.appSecret;
   if (hasEnv) {
     merged = merge(merged, envData);
     sources.push({ type: "env", detail: "FEISHU_* / OPENCODE_* / BOT_*" });
@@ -145,8 +136,6 @@ function finalizeConfig(
     );
   }
 
-  const baseUrl =
-    (opencode.baseUrl as string) ?? DEFAULT_OPENCODE_BASE_URL;
   const timeout =
     typeof opencode.timeout === "number" && opencode.timeout > 0
       ? opencode.timeout
@@ -158,10 +147,6 @@ function finalizeConfig(
       appSecret: String(feishu.appSecret),
     },
     opencode: {
-      baseUrl: baseUrl.replace(/\/$/, ""),
-      directory: opencode.directory as string | undefined,
-      model: opencode.model as string | undefined,
-      agent: opencode.agent as string | undefined,
       timeout,
     },
     bot: {
@@ -177,8 +162,6 @@ function finalizeConfig(
         typeof bot.streamInterval === "number" && bot.streamInterval > 0
           ? bot.streamInterval
           : DEFAULT_STREAM_INTERVAL,
-      groupFilter:
-        typeof bot.groupFilter === "boolean" ? bot.groupFilter : true,
     },
   };
 }

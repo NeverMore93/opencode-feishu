@@ -1,7 +1,6 @@
 /**
  * 飞书用户 <-> OpenCode 会话映射：自动创建/恢复、缓存、手动切换
  */
-import type { OpenCodeConfig } from "../types.js";
 import type { OpenCodeClient, Session } from "../opencode/client.js";
 
 const SESSION_KEY_PREFIX = "feishu";
@@ -19,7 +18,6 @@ function buildTitlePrefix(sessionKey: string): string {
 
 export interface SessionManagerOptions {
   client: OpenCodeClient;
-  directory?: string;
 }
 
 interface CacheEntry {
@@ -32,11 +30,8 @@ interface CacheEntry {
  */
 export class SessionManager {
   private cache = new Map<string, CacheEntry>();
-  private directory?: string;
 
-  constructor(private client: OpenCodeClient, options: SessionManagerOptions) {
-    this.directory = options.directory;
-  }
+  constructor(private client: OpenCodeClient, _options: SessionManagerOptions) {}
 
   /** 获取当前会话键对应的 OpenCode 会话（不存在则创建或恢复） */
   async getOrCreate(
@@ -86,7 +81,7 @@ export class SessionManager {
 
     // 3. 新建会话
     const title = `${titlePrefix}${Date.now()}`;
-    const session = await this.client.createSession(title, this.directory);
+    const session = await this.client.createSession(title);
     this.cache.set(sessionKey, { sessionId: session.id, lastActivity: now });
     return session;
   }

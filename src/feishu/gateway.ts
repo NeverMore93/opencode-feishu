@@ -65,9 +65,9 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
 
         const chatType = (message.chat_type as string) === "group" ? "group" : "p2p";
 
-        // 群聊过滤：不再丢弃消息，而是设置 shouldReply 标记
+        // 群聊：仅在被 @ 时回复（静默监听）
         let shouldReply = true;
-        if (chatType === "group" && config.bot.groupFilter) {
+        if (chatType === "group") {
           const mentions = Array.isArray(message.mentions) ? message.mentions : [];
           shouldReply = isBotMentioned(
             mentions as Array<{ id?: { open_id?: string } }>,

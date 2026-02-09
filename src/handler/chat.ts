@@ -16,8 +16,6 @@ export interface ChatDeps {
   opencodeClient: OpenCodeClient;
   sessionManager: SessionManager;
   feishuClient: InstanceType<typeof Lark.Client>;
-  getModel: (ctx: FeishuMessageContext) => string | undefined;
-  getAgent?: (ctx: FeishuMessageContext) => string | undefined;
   log: (level: "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) => void;
   /** 可选：注册/注销 SSE 流式更新（阶段6） */
   registerPending?: (sessionId: string, payload: { chatId: string; placeholderId: string; feishuClient: InstanceType<typeof Lark.Client> }) => void;
@@ -28,11 +26,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   const { content, chatId, chatType, senderId, shouldReply } = ctx;
   if (!content.trim()) return;
 
-  const { config, opencodeClient, sessionManager, feishuClient, getModel, getAgent, log, registerPending: regPending, unregisterPending: unregPending } = deps;
+  const { config, opencodeClient, sessionManager, feishuClient, log, registerPending: regPending, unregisterPending: unregPending } = deps;
 
   const session = await sessionManager.getOrCreate(chatType, senderId, chatId);
-  const model = getModel(ctx) ?? config.opencode.model;
-  const agent = getAgent?.(ctx) ?? config.opencode.agent;
 
   // Build prompt content with sender identity for group chats
   let promptContent = content;
@@ -43,7 +39,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   // 静默监听模式：消息发给 OpenCode 作为上下文，但不触发 AI 回复、不在飞书回复
   if (!shouldReply) {
     try {
-      await opencodeClient.sendPrompt(session.id, promptContent, { model, agent, noReply: true });
+      await opencodeClient.sendPrompt(session.id, promptContent, { noReply: true });
     } catch (err) {
       log("warn", "静默转发失败", {
         error: err instanceof Error ? err.message : String(err),
@@ -73,7 +69,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
   try {
 
-    await opencodeClient.sendPrompt(session.id, promptContent, { model, agent });
+    await opencodeClient.sendPrompt(session.id, promptContent);
     sessionIdForCleanup = session.id;
     if (placeholderId && regPending) {
       regPending(session.id, { chatId, placeholderId, feishuClient });

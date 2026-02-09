@@ -13,11 +13,6 @@ export interface FeishuConfig {
 }
 
 export interface OpenCodeConfig {
-  baseUrl: string;
-  directory?: string;
-  model?: string;
-  /** 默认使用的 OpenCode Agent（如 build、plan、general） */
-  agent?: string;
   timeout: number;
 }
 
@@ -25,7 +20,6 @@ export interface BotConfig {
   thinkingDelay: number;
   enableStreaming: boolean;
   streamInterval: number;
-  groupFilter: boolean;
 }
 
 /**
@@ -58,7 +52,6 @@ export interface SessionState {
   chatType: "p2p" | "group";
   createdAt: number;
   lastActivity: number;
-  model?: string;
 }
 
 /**

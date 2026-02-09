@@ -7,13 +7,9 @@ import { loadConfigWithSource } from "./config.js";
 import { startFeishuGateway } from "./feishu/gateway.js";
 import { createOpenCodeClient } from "./opencode/client.js";
 import { createSessionManager } from "./session/manager.js";
-import { route } from "./handler/router.js";
-import { runCommand, sessionKeyFromContext } from "./handler/commands.js";
 import { handleChat } from "./handler/chat.js";
 import { startEventStream, registerPending, unregisterPending } from "./opencode/events.js";
 import { ingestGroupHistory } from "./feishu/history.js";
-import type { FeishuMessageContext } from "./types.js";
-
 const SERVICE_NAME = "opencode-feishu";
 
 function log(level: "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) {
@@ -80,7 +76,6 @@ async function main(): Promise<void> {
     config = result.config;
     log("info", "配置加载成功", {
       sources: result.sources.map((s) => s.type),
-      opencodeBaseUrl: config.opencode.baseUrl,
     });
   } catch (err) {
     log("error", "配置加载失败", {
@@ -93,11 +88,10 @@ async function main(): Promise<void> {
   const botOpenId = await fetchBotOpenId(config.feishu.appId, config.feishu.appSecret);
 
   // 阶段3: OpenCode 客户端
-  const opencodeClient = createOpenCodeClient(config.opencode);
+  const opencodeClient = createOpenCodeClient({ timeout: config.opencode.timeout });
   const opencodeHealthy = await opencodeClient.health();
   log(opencodeHealthy ? "info" : "warn", "OpenCode 连接状态", {
     healthy: opencodeHealthy,
-    baseUrl: config.opencode.baseUrl,
   });
 
   // 阶段6: SSE 事件流（流式更新占位消息）
@@ -106,53 +100,25 @@ async function main(): Promise<void> {
     log,
   });
 
-  // 阶段4: 会话管理 + 模型覆盖
-  const sessionManager = createSessionManager({
-    client: opencodeClient,
-    directory: config.opencode.directory,
-  });
-  const modelOverrides = new Map<string, string>();
-  const agentOverrides = new Map<string, string>();
+  // 阶段4: 会话管理
+  const sessionManager = createSessionManager({ client: opencodeClient });
 
   // 阶段2 + 阶段5: 飞书网关与消息处理
   const { client: feishuClient, stop: stopFeishu } = startFeishuGateway({
     config,
     botOpenId,
     onMessage: async (ctx) => {
-      const r = route(ctx);
-      if (r.type === "command") {
-        // 群聊静默模式下命令也不回复（仅 @提及时回复命令）
-        if (!ctx.shouldReply) return;
-        const commandDeps = {
-          config,
-          opencodeClient,
-          sessionManager,
-          getModel: (c: FeishuMessageContext) => modelOverrides.get(sessionKeyFromContext(c)),
-          setModel: (c: FeishuMessageContext, m: string) => modelOverrides.set(sessionKeyFromContext(c), m),
-          getAgent: (c: FeishuMessageContext) => agentOverrides.get(sessionKeyFromContext(c)),
-          setAgent: (c: FeishuMessageContext, a: string) => agentOverrides.set(sessionKeyFromContext(c), a),
-        };
-        const reply = await runCommand(r, ctx, commandDeps);
-        if (reply) {
-          const { sendTextMessage } = await import("./feishu/sender.js");
-          await sendTextMessage(feishuClient, ctx.chatId, reply);
-        }
-        return;
-      }
-      if (r.type === "chat" && r.content) {
-        const chatDeps = {
-          config,
-          opencodeClient,
-          sessionManager,
-          feishuClient,
-          getModel: (c: FeishuMessageContext) => modelOverrides.get(sessionKeyFromContext(c)),
-          getAgent: (c: FeishuMessageContext) => agentOverrides.get(sessionKeyFromContext(c)),
-          log,
-          registerPending,
-          unregisterPending,
-        };
-        await handleChat({ ...ctx, content: r.content }, chatDeps);
-      }
+      if (!ctx.content.trim()) return;
+      const chatDeps = {
+        config,
+        opencodeClient,
+        sessionManager,
+        feishuClient,
+        log,
+        registerPending,
+        unregisterPending,
+      };
+      await handleChat(ctx, chatDeps);
     },
     onBotAdded: (chatId: string) => {
       // 异步摄入群聊历史上下文，不阻塞事件处理
