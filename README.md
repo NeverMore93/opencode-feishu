@@ -7,7 +7,8 @@
 - **飞书 WebSocket 长连接**：使用飞书「事件与回调」的「长连接」模式接收消息，无需配置 Webhook 地址。
 - **OpenCode 对话**：将飞书消息转为 OpenCode 会话的 prompt，通过轮询 + SSE 事件流获取回复并回写到飞书。
 - **命令**：`/help`、`/models`、`/model`、`/session`（list/new/switch/delete/info）、`/agents`、`/agent`、`/health`。
-- **群聊智能过滤**：仅在 @ 提及、问句或明确请求时回复，减少刷屏。
+- **群聊静默监听**：始终将群消息转发给 OpenCode 积累上下文，仅在 bot 被直接 @提及时才回复，避免刷屏。
+- **入群上下文摄入**：bot 被拉入群聊时，自动读取历史消息作为 OpenCode 对话上下文。
 - **SSE 事件流**：实时更新「正在思考…」占位消息，断线自动重连（5 秒间隔）。
 
 ---
@@ -19,12 +20,14 @@ flowchart LR
   FeishuApp["Feishu App (WebSocket)"] --> Gateway["gateway.ts"]
   Gateway --> Dedup["dedup.ts"]
   Gateway --> GroupFilter["group-filter.ts"]
+  Gateway -->|"bot.added"| History["history.ts"]
   Gateway --> Router["router.ts"]
   Router -->|"/command"| Commands["commands.ts"]
   Router -->|"chat"| Chat["chat.ts"]
   Chat --> SessionMgr["session/manager.ts"]
   Chat --> OcClient["opencode/client.ts"]
   OcClient --> OpenCodeAPI["OpenCode Server API"]
+  History --> OcClient
   Commands --> OcClient
   Commands --> Sender["sender.ts"]
   Chat --> Sender
@@ -35,6 +38,8 @@ flowchart LR
 
 - **命令路径**：用户发送 `/xxx` → 路由到 `commands.ts`，调用 OpenCode 客户端或会话管理器，结果经 `sender.ts` 发回飞书。
 - **对话路径**：用户发送普通消息 → `chat.ts` 获取/创建 OpenCode 会话、发送 prompt，轮询消息列表并在稳定后回写；同时 `events.ts` 订阅 OpenCode SSE，实时更新飞书占位消息。
+- **静默监听**：群聊中未被 @提及的消息通过 `noReply: true` 发送给 OpenCode，仅记录上下文但不触发 AI 回复。
+- **入群摄入**：`im.chat.member.bot.added_v1` 事件触发后，`history.ts` 拉取群聊历史消息并以 `noReply: true` 注入 OpenCode。
 - **事件流**：`events.ts` 与 OpenCode 保持 SSE 连接，收到 `message.part.updated` 等事件时更新对应会话的飞书占位消息，断线后 5 秒重连。
 
 ---
@@ -61,7 +66,13 @@ flowchart LR
 
 - 进入「事件与回调」页面。
 - **不需要**填写「请求地址」：本服务使用 **WebSocket 长连接** 接收消息，而非 Webhook。
-- 在「事件订阅」中添加事件：`im.message.receive_v1`（接收单聊与群聊消息）。
+- 在「事件订阅」中添加以下事件：
+
+| 事件 | 说明 |
+|------|------|
+| `im.message.receive_v1` | 接收单聊与群聊消息 |
+| `im.chat.member.bot.added_v1` | 机器人进群（触发历史上下文摄入） |
+
 - 保存。
 
 ### 4.4 订阅方式：长连接（必选）
@@ -77,6 +88,7 @@ flowchart LR
 | `im:message` | 获取与发送单聊、群组消息 |
 | `im:message:send_as_bot` | 以应用身份发消息 |
 | `im:chat` | 获取群组信息（群聊场景需要） |
+| `im:message:readonly`（群聊消息读取） | 获取群组中所有消息（入群历史摄入需要） |
 
 保存后若有权限变更，需在「版本管理与发布」中重新发布。
 
@@ -116,7 +128,7 @@ flowchart LR
 | `BOT_THINKING_DELAY` | number | 2500 | 发送「正在思考…」前的延迟（毫秒） |
 | `BOT_ENABLE_STREAMING` | boolean | true | 是否启用流式更新占位消息 |
 | `BOT_STREAM_INTERVAL` | number | 1000 | 流式更新间隔（毫秒） |
-| `BOT_GROUP_FILTER` | boolean | true | 是否启用群聊智能过滤 |
+| `BOT_GROUP_FILTER` | boolean | true | 是否启用群聊静默监听模式 |
 
 ### 5.2 配置文件
 
@@ -171,10 +183,42 @@ npm run dev
 | 日志内容 | 含义 |
 |----------|------|
 | `配置加载成功` | 环境变量/配置文件已加载 |
+| `Bot open_id 获取成功` | 成功获取 bot 身份信息（用于 @提及检测） |
 | `OpenCode 连接状态 healthy: true` | OpenCode 服务可达 |
 | `OpenCode 事件流连接中…` | 正在连接 OpenCode SSE |
 | `Feishu WebSocket gateway started` | 飞书 WebSocket 网关已启动 |
 | `服务就绪：飞书网关已连接` | 可正常收发消息 |
+
+---
+
+## 本地打包与安装
+
+### 打包为 tarball
+
+```bash
+npm run build
+npm pack
+```
+
+生成 `opencode-feishu-0.1.0.tgz`，包含 `dist/` 和 `README.md`。
+
+### 全局安装
+
+```bash
+# 从 tarball 安装
+npm install -g ./opencode-feishu-0.1.0.tgz
+
+# 或开发模式（链接本地目录）
+npm link
+```
+
+安装后可在任意目录运行 `opencode-feishu` 命令启动服务。
+
+### 作为依赖安装到其他项目
+
+```bash
+npm install /path/to/opencode-feishu-0.1.0.tgz
+```
 
 ---
 
@@ -234,13 +278,29 @@ npm run dev
 
 ## 群聊行为
 
-启用 `BOT_GROUP_FILTER=true`（默认）时，仅在以下情况回复群消息：
+启用 `BOT_GROUP_FILTER=true`（默认）时，bot 在群聊中以**静默监听模式**运行：
 
-- 消息中存在 @ 提及；
-- 消息以 `?` 或 `？` 结尾；
-- 包含英文问词（如 why、how、what、when、where、who、help）；
-- 包含中文请求类动词（如 帮、请、解释、分析、总结、写、改、修、查、翻译 等）；
-- 消息以配置的机器人名称开头（默认含 opencode、bot、助手、智能体等）且后跟分隔符。
+### 静默监听
+
+- 群聊中的**所有文本消息**都会转发给 OpenCode 作为对话上下文（使用 `noReply: true`，不触发 AI 回复、不消耗 AI tokens）。
+- 仅在 bot 被**直接 @提及**时，才触发正常的 AI 对话并在飞书群内回复。
+- 未被 @提及的消息在飞书侧完全无感——不会产生任何回复或可见的 bot 行为。
+
+### 入群上下文摄入
+
+- 当 bot 被**首次拉入群聊**时（触发 `im.chat.member.bot.added_v1` 事件），自动拉取该群最近 50 条历史消息。
+- 历史消息格式化后以 `noReply: true` 发送给 OpenCode，作为对话的背景上下文。
+- 后续当有人 @bot 提问时，AI 已拥有群聊的历史背景，可以给出更精准的回答。
+
+### 行为矩阵
+
+| 场景 | 发送到 OpenCode | noReply | 飞书回复 |
+|------|:---:|:---:|:---:|
+| 单聊（私聊） | 是 | 否 | 是 |
+| 群聊 + bot 被 @提及 | 是 | 否 | 是 |
+| 群聊 + bot 未被 @提及 | 是 | **是** | **否** |
+| `BOT_GROUP_FILTER=false` | 是 | 否 | 是（所有消息） |
+| bot 首次入群 | 历史消息 | **是** | **否** |
 
 若希望群内每条消息都触发回复，可设置 `BOT_GROUP_FILTER=false`。
 
@@ -269,7 +329,9 @@ npm run dev
 |------|----------|------|
 | 启动报错「Missing Feishu config」 | 未设置 `FEISHU_APP_ID` 或 `FEISHU_APP_SECRET` | 在 `.env` 或配置文件中填写飞书凭证 |
 | 日志中「OpenCode 连接状态 healthy: false」 | OpenCode 未启动或地址错误 | 确认 OpenCode 已运行，并检查 `OPENCODE_BASE_URL` |
-| 群聊中不回复 | 未使用长连接或群聊过滤未命中 | 在飞书开放平台将订阅方式改为「长连接」；或设置 `BOT_GROUP_FILTER=false` 观察 |
+| 日志中「Bot open_id 为空」或「fallback 模式」 | bot info API 调用失败 | 检查飞书 App ID/Secret 是否正确；fallback 模式下任何 @提及都会触发回复 |
+| 群聊中不回复 | 未 @提及 bot 或未使用长连接 | 在群中 @bot 后发送消息；在飞书开放平台将订阅方式改为「长连接」 |
+| 入群后未摄入历史 | 未订阅 `im.chat.member.bot.added_v1` 事件或缺少群消息读取权限 | 在飞书开放平台添加事件订阅并开通 `im:message:readonly` 权限 |
 | 回复显示「响应超时」 | 等待时间超过 `OPENCODE_TIMEOUT` 或 OpenCode 响应过慢 | 适当增大 `OPENCODE_TIMEOUT` 或检查 OpenCode 与模型状态 |
 | 同一条消息被处理多次 | 飞书 WebSocket 重复投递 | 服务内对同一 `messageId` 在 10 分钟内去重，一般无需处理；若仍异常可检查 `dedup` 逻辑 |
 
@@ -280,20 +342,21 @@ npm run dev
 ```
 opencode-feishu/
 ├── src/
-│   ├── index.ts          # 入口：加载配置、启动网关与事件流、挂接命令与对话
+│   ├── index.ts          # 入口：加载配置、获取 bot info、启动网关与事件流、挂接命令与对话
 │   ├── config.ts          # 多源配置加载（文件 + 环境变量）
 │   ├── types.ts           # 配置与消息上下文等类型定义
 │   ├── feishu/
-│   │   ├── gateway.ts     # 飞书 WebSocket 网关与消息回调
+│   │   ├── gateway.ts     # 飞书 WebSocket 网关、消息回调与 bot 入群事件
 │   │   ├── sender.ts      # 飞书消息发送、更新、删除
 │   │   ├── dedup.ts       # 消息去重（10 分钟窗口）
-│   │   └── group-filter.ts # 群聊智能过滤
+│   │   ├── group-filter.ts # 群聊 @提及检测（仅在 bot 被直接 @时回复）
+│   │   └── history.ts     # 入群历史上下文摄入
 │   ├── handler/
 │   │   ├── router.ts      # 解析 / 命令与普通聊天
 │   │   ├── commands.ts    # 各 / 命令实现
-│   │   └── chat.ts        # 对话：占位、prompt、轮询、回写
+│   │   └── chat.ts        # 对话：静默监听 / 占位、prompt、轮询、回写
 │   ├── opencode/
-│   │   ├── client.ts      # OpenCode SDK 封装（会话、消息、模型、Agent、健康、SSE）
+│   │   ├── client.ts      # OpenCode SDK 封装（会话、消息、模型、Agent、健康、SSE、noReply）
 │   │   └── events.ts     # OpenCode SSE 订阅与占位实时更新
 │   └── session/
 │       └── manager.ts    # 飞书会话键与 OpenCode 会话的映射与恢复

@@ -39,6 +39,8 @@ export interface FeishuMessageContext {
   chatType: "p2p" | "group";
   senderId: string;
   rootId?: string;
+  /** false = 静默监听：消息转发给 OpenCode 但不在飞书回复（群聊未被 @提及时） */
+  shouldReply: boolean;
 }
 
 /**

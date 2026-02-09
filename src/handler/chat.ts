@@ -25,10 +25,27 @@ export interface ChatDeps {
 }
 
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Promise<void> {
-  const { content, chatId, chatType, senderId } = ctx;
+  const { content, chatId, chatType, senderId, shouldReply } = ctx;
   if (!content.trim()) return;
 
   const { config, opencodeClient, sessionManager, feishuClient, getModel, getAgent, log, registerPending: regPending, unregisterPending: unregPending } = deps;
+
+  const session = await sessionManager.getOrCreate(chatType, senderId, chatId);
+  const model = getModel(ctx) ?? config.opencode.model;
+  const agent = getAgent?.(ctx) ?? config.opencode.agent;
+
+  // 静默监听模式：消息发给 OpenCode 作为上下文，但不触发 AI 回复、不在飞书回复
+  if (!shouldReply) {
+    try {
+      await opencodeClient.sendPrompt(session.id, content, { model, agent, noReply: true });
+    } catch (err) {
+      log("warn", "静默转发失败", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return;
+  }
+
   const timeout = config.opencode.timeout ?? MAX_WAIT_MS;
   const thinkingDelay = config.bot.thinkingDelay ?? 2500;
 
@@ -49,9 +66,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       : null;
 
   try {
-    const session = await sessionManager.getOrCreate(chatType, senderId, chatId);
-    const model = getModel(ctx) ?? config.opencode.model;
-    const agent = getAgent?.(ctx) ?? config.opencode.agent;
 
     await opencodeClient.sendPrompt(session.id, content, { model, agent });
     sessionIdForCleanup = session.id;

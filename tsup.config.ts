@@ -11,4 +11,7 @@ export default defineConfig({
   splitting: false,
   treeshake: true,
   minify: false,
+  banner: {
+    js: "#!/usr/bin/env node",
+  },
 });

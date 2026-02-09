@@ -4,12 +4,16 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import type { FeishuMessageContext } from "../types.js";
 import { isDuplicate } from "./dedup.js";
-import { shouldRespondInGroup } from "./group-filter.js";
+import { isBotMentioned } from "./group-filter.js";
 import type { Config } from "../types.js";
 
 export interface FeishuGatewayOptions {
   config: Config;
+  /** bot 自身的 open_id（启动时通过 bot info API 获取），用于群聊 @提及检测 */
+  botOpenId?: string;
   onMessage: (ctx: FeishuMessageContext) => void | Promise<void>;
+  /** bot 被拉入群聊时触发（用于摄入历史上下文） */
+  onBotAdded?: (chatId: string) => void | Promise<void>;
   log: (level: "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -22,7 +26,7 @@ export interface FeishuGatewayResult {
  * 启动飞书 WebSocket 网关，返回 Client（供 sender 使用）和 stop 函数
  */
 export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGatewayResult {
-  const { config, onMessage, log } = options;
+  const { config, botOpenId = "", onMessage, onBotAdded, log } = options;
   const { appId, appSecret } = config.feishu;
 
   const sdkConfig = {
@@ -60,10 +64,17 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         if (!text) return;
 
         const chatType = (message.chat_type as string) === "group" ? "group" : "p2p";
+
+        // 群聊过滤：不再丢弃消息，而是设置 shouldReply 标记
+        let shouldReply = true;
         if (chatType === "group" && config.bot.groupFilter) {
           const mentions = Array.isArray(message.mentions) ? message.mentions : [];
-          if (!shouldRespondInGroup(text, mentions)) return;
+          shouldReply = isBotMentioned(
+            mentions as Array<{ id?: { open_id?: string } }>,
+            botOpenId
+          );
         }
+
         const sender = (data as { sender?: { sender_id?: { open_id?: string } } }).sender;
         const senderId = sender?.sender_id?.open_id ?? "";
         const rootId = message.root_id as string | undefined;
@@ -76,11 +87,25 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           chatType,
           senderId,
           rootId,
+          shouldReply,
         };
 
         await onMessage(ctx);
       } catch (err) {
         log("error", "Message handler error", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    "im.chat.member.bot.added_v1": async (data: Record<string, unknown>) => {
+      try {
+        const chatId = data.chat_id as string | undefined;
+        if (chatId && onBotAdded) {
+          log("info", "Bot added to group chat", { chatId });
+          await onBotAdded(chatId);
+        }
+      } catch (err) {
+        log("error", "Bot-added handler error", {
           error: err instanceof Error ? err.message : String(err),
         });
       }

@@ -1,42 +1,18 @@
 /**
- * 群聊智能过滤：仅在@提及、问句或明确请求时回复，避免刷屏
+ * 群聊过滤：仅在 bot 被直接 @提及时回复
  */
-const DEFAULT_BOT_NAMES = ["opencode", "bot", "助手", "智能体"];
 
 /**
- * 判断是否应在群聊中回复该条消息
- * @param text 消息正文（已去除 @ 占位符）
+ * 检查 bot 是否被直接 @提及
  * @param mentions 飞书事件中的 @ 提及列表
- * @param botNames 用于称呼检测的机器人名称列表
+ * @param botOpenId bot 自身的 open_id（启动时获取）
+ * @returns 当 bot 被 @提及时返回 true
  */
-export function shouldRespondInGroup(
-  text: string,
-  mentions: unknown[],
-  botNames?: string[]
+export function isBotMentioned(
+  mentions: Array<{ id?: { open_id?: string }; [key: string]: unknown }>,
+  botOpenId: string
 ): boolean {
-  if (mentions.length > 0) return true;
-
-  const t = text.toLowerCase();
-
-  if (/[？?]$/.test(text)) return true;
-  if (/\b(why|how|what|when|where|who|help)\b/.test(t)) return true;
-
-  const verbs = [
-    "帮", "麻烦", "请", "能否", "可以", "解释", "看看",
-    "排查", "分析", "总结", "写", "改", "修", "查", "对比", "翻译",
-  ];
-  if (verbs.some((k) => text.includes(k))) return true;
-
-  const names = botNames?.length ? botNames : DEFAULT_BOT_NAMES;
-  const namePattern = new RegExp(
-    `^(${names.map(escapeRegex).join("|")})[\\s,:，：]`,
-    "i"
-  );
-  if (namePattern.test(text)) return true;
-
-  return false;
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // fallback: 若启动时未能获取 bot open_id，只要有任何 @提及就回复
+  if (!botOpenId) return mentions.length > 0;
+  return mentions.some((m) => m.id?.open_id === botOpenId);
 }

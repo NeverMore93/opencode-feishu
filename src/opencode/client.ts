@@ -122,7 +122,7 @@ export class OpenCodeClient {
   async sendPrompt(
     sessionId: string,
     content: string,
-    options?: { model?: string; agent?: string }
+    options?: { model?: string; agent?: string; noReply?: boolean }
   ): Promise<{ messageId?: string }> {
     const client = await this.getClient();
     const body: {
@@ -135,6 +135,7 @@ export class OpenCodeClient {
     };
     if (options?.model) body.model = parseModel(options.model);
     if (options?.agent) body.agent = options.agent;
+    if (options?.noReply) body.noReply = true;
     const result = await client.session.prompt({
       path: { id: sessionId },
       body,
