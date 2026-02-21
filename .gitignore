@@ -12,6 +12,4 @@ node_modules
 .cursor
 
 .specify
-.cursor\rules\openmemory.mdc
-/openmemory.md
-CLAUDE.md
+openmemory.md
