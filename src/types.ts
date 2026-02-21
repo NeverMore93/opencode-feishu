@@ -1,67 +1,44 @@
 /**
- * 应用配置
- */
-export interface Config {
-  feishu: FeishuConfig;
-  opencode: OpenCodeConfig;
-  bot: BotConfig;
-}
-
-export interface FeishuConfig {
-  appId: string;
-  appSecret: string;
-}
-
-export interface OpenCodeConfig {
-  timeout: number;
-}
-
-export interface BotConfig {
-  thinkingDelay: number;
-  enableStreaming: boolean;
-  streamInterval: number;
-}
-
-/**
- * 飞书消息上下文（接收）
+ * 飞书消息上下文（网关提取后传递给处理器）
  */
 export interface FeishuMessageContext {
-  chatId: string;
-  messageId: string;
-  messageType: string;
-  content: string;
-  chatType: "p2p" | "group";
-  senderId: string;
-  rootId?: string;
+  chatId: string
+  messageId: string
+  messageType: string
+  content: string
+  chatType: "p2p" | "group"
+  senderId: string
+  rootId?: string
   /** false = 静默监听：消息转发给 OpenCode 但不在飞书回复（群聊未被 @提及时） */
-  shouldReply: boolean;
+  shouldReply: boolean
 }
 
 /**
- * 飞书会话键（用于映射 OpenCode 会话）
+ * 插件配置（从 ~/.config/opencode/plugin/feishu.json 读取）
  */
-export type FeishuSessionKey = string;
-
-/**
- * 会话状态（飞书用户 <-> OpenCode 会话）
- */
-export interface SessionState {
-  sessionId: string;
-  feishuChatId: string;
-  feishuUserId: string;
-  chatType: "p2p" | "group";
-  createdAt: number;
-  lastActivity: number;
+export interface FeishuPluginConfig {
+  appId: string
+  appSecret: string
+  timeout?: number
+  thinkingDelay?: number
+  proxy?: string
 }
 
 /**
- * 配置来源（用于诊断）
+ * 合并默认值后的完整配置
  */
-export type ConfigSource =
-  | { type: "file"; detail: string }
-  | { type: "env"; detail: string };
-
-export interface LoadConfigResult {
-  config: Config;
-  sources: ConfigSource[];
+export interface ResolvedConfig {
+  appId: string
+  appSecret: string
+  timeout: number
+  thinkingDelay: number
 }
+
+/**
+ * 插件日志函数签名
+ */
+export type LogFn = (
+  level: "info" | "warn" | "error",
+  message: string,
+  extra?: Record<string, unknown>,
+) => void

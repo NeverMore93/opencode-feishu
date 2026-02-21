@@ -11,7 +11,6 @@ export default defineConfig({
   splitting: false,
   treeshake: true,
   minify: false,
-  banner: {
-    js: "#!/usr/bin/env node",
-  },
+  external: ["@opencode-ai/plugin", "@opencode-ai/sdk"],
+  noExternal: ["@larksuiteoapi/node-sdk"],
 });

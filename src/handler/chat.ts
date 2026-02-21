@@ -1,155 +1,162 @@
 /**
- * 普通对话处理：占位消息、prompt 发送、轮询等待、最终回复
+ * 对话处理：会话管理、占位消息、prompt 发送、轮询等待、最终回复
  */
-import type { FeishuMessageContext } from "../types.js";
-import type { Config } from "../types.js";
-import type { OpenCodeClient } from "../opencode/client.js";
-import type { SessionManager } from "../session/manager.js";
-import * as sender from "../feishu/sender.js";
-import type * as Lark from "@larksuiteoapi/node-sdk";
+import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
+import type { OpencodeClient } from "@opencode-ai/sdk"
+import * as sender from "../feishu/sender.js"
+import { registerPending, unregisterPending } from "./event.js"
+import { buildSessionKey, getOrCreateSession } from "../session.js"
+import type * as Lark from "@larksuiteoapi/node-sdk"
 
-const POLL_INTERVAL_MS = 1500;
-const MAX_WAIT_MS = 120_000;
+const POLL_INTERVAL_MS = 1500
+const STABLE_POLLS = 2
 
 export interface ChatDeps {
-  config: Config;
-  opencodeClient: OpenCodeClient;
-  sessionManager: SessionManager;
-  feishuClient: InstanceType<typeof Lark.Client>;
-  log: (level: "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) => void;
-  /** 可选：注册/注销 SSE 流式更新（阶段6） */
-  registerPending?: (sessionId: string, payload: { chatId: string; placeholderId: string; feishuClient: InstanceType<typeof Lark.Client> }) => void;
-  unregisterPending?: (sessionId: string) => void;
+  config: ResolvedConfig
+  client: OpencodeClient
+  feishuClient: InstanceType<typeof Lark.Client>
+  log: LogFn
+  directory: string
 }
 
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Promise<void> {
-  const { content, chatId, chatType, senderId, shouldReply } = ctx;
-  if (!content.trim()) return;
+  const { content, chatId, chatType, senderId, shouldReply } = ctx
+  if (!content.trim()) return
 
-  const { config, opencodeClient, sessionManager, feishuClient, log, registerPending: regPending, unregisterPending: unregPending } = deps;
+  const { config, client, feishuClient, log, directory } = deps
+  const query = directory ? { directory } : undefined
 
-  const session = await sessionManager.getOrCreate(chatType, senderId, chatId);
+  const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
+  const session = await getOrCreateSession(client, sessionKey, directory)
 
-  // Build prompt content with sender identity for group chats
-  let promptContent = content;
+  // 群聊消息添加发送者身份前缀
+  let promptContent = content
   if (chatType === "group" && senderId) {
-    promptContent = `[${senderId}]: ${content}`;
+    promptContent = `[${senderId}]: ${content}`
   }
 
-  // 静默监听模式：消息发给 OpenCode 作为上下文，但不触发 AI 回复、不在飞书回复
+  // 静默监听模式：消息发给 OpenCode 作为上下文，不触发 AI 回复
   if (!shouldReply) {
     try {
-      await opencodeClient.sendPrompt(session.id, promptContent, { noReply: true });
+      await client.session.prompt({
+        path: { id: session.id },
+        query,
+        body: {
+          parts: [{ type: "text", text: promptContent }],
+          noReply: true,
+        },
+      })
     } catch (err) {
       log("warn", "静默转发失败", {
         error: err instanceof Error ? err.message : String(err),
-      });
+      })
     }
-    return;
+    return
   }
 
-  const timeout = config.opencode.timeout ?? MAX_WAIT_MS;
-  const thinkingDelay = config.bot.thinkingDelay ?? 2500;
+  const timeout = config.timeout
+  const thinkingDelay = config.thinkingDelay
 
-  let placeholderId = "";
-  let sessionIdForCleanup: string | null = null;
-  let done = false;
+  let placeholderId = ""
+  let done = false
   const timer =
     thinkingDelay > 0
       ? setTimeout(async () => {
-          if (done) return;
+          if (done) return
           try {
-            const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…");
-            if (res.ok && res.messageId) placeholderId = res.messageId;
+            const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…")
+            if (res.ok && res.messageId) {
+              placeholderId = res.messageId
+              // 注册到事件系统（用于 SSE 流式更新占位消息）
+              registerPending(session.id, { chatId, placeholderId, feishuClient })
+            }
           } catch {
             // ignore
           }
         }, thinkingDelay)
-      : null;
+      : null
 
   try {
+    await client.session.prompt({
+      path: { id: session.id },
+      query,
+      body: {
+        parts: [{ type: "text", text: promptContent }],
+      },
+    })
 
-    await opencodeClient.sendPrompt(session.id, promptContent);
-    sessionIdForCleanup = session.id;
-    if (placeholderId && regPending) {
-      regPending(session.id, { chatId, placeholderId, feishuClient });
-    }
-
-    const start = Date.now();
-    let lastText = "";
-    let sameCount = 0;
-    const STABLE_POLLS = 2;
+    const start = Date.now()
+    let lastText = ""
+    let sameCount = 0
 
     while (Date.now() - start < timeout) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      const messages = await opencodeClient.getMessages(session.id);
-      const text = extractLastAssistantText(messages);
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+      const { data: messages } = await client.session.messages({ path: { id: session.id }, query })
+      const text = extractLastAssistantText(messages ?? [])
 
       if (text && text !== lastText) {
-        lastText = text;
-        sameCount = 0;
+        lastText = text
+        sameCount = 0
         if (placeholderId) {
           try {
-            await sender.updateMessage(feishuClient, placeholderId, text);
+            await sender.updateMessage(feishuClient, placeholderId, text)
           } catch {
             // best-effort
           }
         }
       } else if (text && text.length > 0) {
-        sameCount++;
-        if (sameCount >= STABLE_POLLS) break;
+        sameCount++
+        if (sameCount >= STABLE_POLLS) break
       }
     }
 
-    const messages = await opencodeClient.getMessages(session.id);
-    const finalText = extractLastAssistantText(messages) || lastText || (Date.now() - start >= timeout ? "⚠️ 响应超时" : "[无回复]");
+    const { data: finalMessages } = await client.session.messages({ path: { id: session.id }, query })
+    const finalText =
+      extractLastAssistantText(finalMessages ?? []) ||
+      lastText ||
+      (Date.now() - start >= timeout ? "⚠️ 响应超时" : "[无回复]")
+
     if (placeholderId) {
       try {
-        await sender.updateMessage(feishuClient, placeholderId, finalText);
+        await sender.updateMessage(feishuClient, placeholderId, finalText)
       } catch {
-        await sender.sendTextMessage(feishuClient, chatId, finalText);
-      }
-      try {
-        await sender.deleteMessage(feishuClient, placeholderId);
-      } catch {
-        // ignore
+        await sender.sendTextMessage(feishuClient, chatId, finalText)
       }
     } else {
-      await sender.sendTextMessage(feishuClient, chatId, finalText);
+      await sender.sendTextMessage(feishuClient, chatId, finalText)
     }
   } catch (err) {
     log("error", "对话处理失败", {
       error: err instanceof Error ? err.message : String(err),
-    });
-    const msg = "❌ " + (err instanceof Error ? err.message : String(err));
+    })
+    const msg = "❌ " + (err instanceof Error ? err.message : String(err))
     if (placeholderId) {
       try {
-        await sender.updateMessage(feishuClient, placeholderId, msg);
+        await sender.updateMessage(feishuClient, placeholderId, msg)
       } catch {
-        await sender.sendTextMessage(feishuClient, chatId, msg);
-      }
-      try {
-        await sender.deleteMessage(feishuClient, placeholderId);
-      } catch {
-        // ignore
+        await sender.sendTextMessage(feishuClient, chatId, msg)
       }
     } else {
-      await sender.sendTextMessage(feishuClient, chatId, msg);
+      await sender.sendTextMessage(feishuClient, chatId, msg)
     }
   } finally {
-    done = true;
-    if (timer) clearTimeout(timer);
-    if (sessionIdForCleanup) unregPending?.(sessionIdForCleanup);
+    done = true
+    if (timer) clearTimeout(timer)
+    unregisterPending(session.id)
   }
 }
 
-function extractLastAssistantText(messages: { info?: { role?: string }; parts?: Array<{ type?: string; text?: string }> }[]): string {
-  const assistant = messages.filter((m) => m.info?.role === "assistant").pop();
-  const parts = assistant?.parts ?? [];
+function extractLastAssistantText(
+  messages: Array<{
+    info: { role?: string; [key: string]: unknown }
+    parts: Array<{ type?: string; text?: string; [key: string]: unknown }>
+  }>,
+): string {
+  const assistant = messages.filter((m) => m.info?.role === "assistant").pop()
+  const parts = assistant?.parts ?? []
   return parts
     .filter((p) => p.type === "text")
     .map((p) => p.text ?? "")
     .join("\n")
-    .trim();
+    .trim()
 }
-
