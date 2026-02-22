@@ -12,5 +12,4 @@ export default defineConfig({
   treeshake: true,
   minify: false,
   external: ["@opencode-ai/plugin", "@opencode-ai/sdk"],
-  noExternal: ["@larksuiteoapi/node-sdk"],
 });
