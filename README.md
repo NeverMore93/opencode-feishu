@@ -1,5 +1,7 @@
 # opencode-feishu
 
+[![npm](https://img.shields.io/npm/v/opencode-feishu)](https://www.npmjs.com/package/opencode-feishu)
+
 [OpenCode](https://opencode.ai) 飞书插件 — 通过飞书 WebSocket 长连接将飞书消息接入 OpenCode AI 对话。
 
 ## 快速开始
