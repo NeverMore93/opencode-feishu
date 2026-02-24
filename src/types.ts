@@ -21,6 +21,7 @@ export interface FeishuPluginConfig {
   appSecret: string
   timeout?: number
   thinkingDelay?: number
+  logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace"
 }
 
 /**
@@ -31,6 +32,7 @@ export interface ResolvedConfig {
   appSecret: string
   timeout: number
   thinkingDelay: number
+  logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace"
 }
 
 /**

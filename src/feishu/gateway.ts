@@ -139,10 +139,19 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     },
   })
 
+  const logLevelMap: Record<string, Lark.LoggerLevel> = {
+    fatal: Lark.LoggerLevel.fatal,
+    error: Lark.LoggerLevel.error,
+    warn: Lark.LoggerLevel.warn,
+    info: Lark.LoggerLevel.info,
+    debug: Lark.LoggerLevel.debug,
+    trace: Lark.LoggerLevel.trace,
+  }
+
   const wsClient = new Lark.WSClient({
     ...sdkConfig,
     agent: wsAgent,
-    loggerLevel: Lark.LoggerLevel.info,
+    loggerLevel: logLevelMap[config.logLevel] ?? Lark.LoggerLevel.info,
     logger: {
       error: (...msg: unknown[]) => log("error", "[lark.ws]", { msg }),
       warn: (...msg: unknown[]) => log("warn", "[lark.ws]", { msg }),

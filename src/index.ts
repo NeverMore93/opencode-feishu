@@ -12,10 +12,12 @@ import { handleEvent } from "./handler/event.js"
 import { ingestGroupHistory } from "./feishu/history.js"
 
 const SERVICE_NAME = "opencode-feishu"
+const isDebug = !!process.env.FEISHU_DEBUG
 
 const DEFAULT_CONFIG: Omit<ResolvedConfig, "appId" | "appSecret"> = {
   timeout: 120_000,
   thinkingDelay: 2_500,
+  logLevel: "info",
 }
 
 export const FeishuPlugin: Plugin = async (ctx) => {
@@ -23,6 +25,9 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   let gateway: FeishuGatewayResult | null = null
 
   const log: LogFn = (level, message, extra) => {
+    if (isDebug) {
+      console.error(JSON.stringify({ ts: new Date().toISOString(), service: SERVICE_NAME, level, message, ...extra }))
+    }
     client.app.log({
       body: {
         service: SERVICE_NAME,
@@ -60,6 +65,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     appSecret: feishuRaw.appSecret,
     timeout: feishuRaw.timeout ?? DEFAULT_CONFIG.timeout,
     thinkingDelay: feishuRaw.thinkingDelay ?? DEFAULT_CONFIG.thinkingDelay,
+    logLevel: feishuRaw.logLevel ?? DEFAULT_CONFIG.logLevel,
   }
 
   // 获取 bot open_id（用于群聊 @提及检测）

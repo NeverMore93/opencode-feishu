@@ -45,23 +45,41 @@ npm run dev
 npm run typecheck
 ```
 
-### 安装到 OpenCode（Windows）
-```powershell
-# 构建
+### 本地调试
+```bash
+# 启用调试模式（日志输出到 stderr）
+FEISHU_DEBUG=1 opencode
+
+# 配合 Lark SDK 详细日志（feishu.json 中设置 "logLevel": "debug"）
+FEISHU_DEBUG=1 opencode
+
+# 过滤错误日志
+FEISHU_DEBUG=1 opencode 2>&1 | grep '"level":"error"'
+
+# 重定向到文件
+FEISHU_DEBUG=1 opencode 2>feishu-debug.log
+```
+
+- `FEISHU_DEBUG=1`：启用 console.error 结构化 JSON 输出（不影响 stdout 管道）
+- `feishu.json` 中 `logLevel`：控制 Lark SDK 内部日志详细程度（`fatal`/`error`/`warn`/`info`/`debug`/`trace`）
+- 不设 `FEISHU_DEBUG` 时行为与之前完全一致（无 console 输出）
+
+### 安装到 OpenCode
+
+**1. 构建插件：**
+```bash
 npm run build
-
-# 创建目录链接（junction，不需要管理员权限）
-$source = Get-Location
-$target = "$env:USERPROFILE\.config\opencode\plugins\opencode-feishu"
-New-Item -ItemType Junction -Path $target -Target $source
 ```
 
-在 `opencode.json` 中声明插件：
+**2. 在 `opencode.json` 中声明插件（使用项目绝对路径）：**
 ```json
-{ "plugin": ["opencode-feishu"] }
+{ "plugin": ["D:/path/to/opencode-feishu"] }
 ```
 
-创建飞书配置文件 `~/.config/opencode/plugins/feishu.json`：
+> OpenCode 插件系统会将路径转换为 `file:///` 协议直接加载 `dist/index.js`。
+> 不要使用包名（如 `"opencode-feishu"`），Windows 上 Bun 安装存在 EPERM 权限问题。
+
+**3. 创建飞书配置文件** `~/.config/opencode/plugins/feishu.json`：
 ```json
 { "appId": "cli_xxxxxxxxxxxx", "appSecret": "your_secret" }
 ```
@@ -141,7 +159,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 ```
 
 必需字段：`appId`, `appSecret`
-可选字段：`timeout`（默认 120000ms）、`thinkingDelay`（默认 2500ms）
+可选字段：`timeout`（默认 120000ms）、`thinkingDelay`（默认 2500ms）、`logLevel`（默认 `"info"`，控制 Lark SDK 日志级别）
 
 ## 群聊行为
 
@@ -203,7 +221,8 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ## 日志记录
 
-- 通过 `client.app.log()` 输出到 OpenCode 日志系统（唯一日志输出方式）
+- 通过 `client.app.log()` 输出到 OpenCode 日志系统（主日志通道）
+- 设置 `FEISHU_DEBUG=1` 环境变量时同时输出结构化 JSON 到 stderr（调试用）
 - 服务标识："opencode-feishu"
 - 级别：info、warn、error
 - 日志调用使用 `.catch(() => {})` 静默处理失败（防止 Unhandled Promise Rejection）
