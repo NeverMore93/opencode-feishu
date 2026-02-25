@@ -54,7 +54,9 @@ export const FeishuPlugin: Plugin = async (ctx) => {
 
   let feishuRaw: FeishuPluginConfig
   try {
-    feishuRaw = JSON.parse(readFileSync(configPath, "utf-8")) as FeishuPluginConfig
+    feishuRaw = resolveEnvPlaceholders(
+      JSON.parse(readFileSync(configPath, "utf-8")),
+    ) as FeishuPluginConfig
   } catch (parseErr) {
     throw new Error(`飞书配置文件格式错误：${configPath} 必须是合法的 JSON (${parseErr})`)
   }
@@ -124,6 +126,35 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     },
   }
   return hooks
+}
+
+/**
+ * 递归替换对象中字符串值里的 ${ENV_VAR} 占位符。
+ * 明文值原样保留，仅替换包含 ${...} 的字符串。
+ * 环境变量未设置时抛出错误，防止静默使用空值。
+ */
+function resolveEnvPlaceholders(obj: unknown): unknown {
+  if (typeof obj === "string") {
+    if (!obj.includes("${")) return obj
+    return obj.replace(/\$\{(\w+)\}/g, (_match, name: string) => {
+      const val = process.env[name]
+      if (val === undefined) {
+        throw new Error(`环境变量 ${name} 未设置（配置值引用了 \${${name}}）`)
+      }
+      return val
+    })
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(resolveEnvPlaceholders)
+  }
+  if (obj !== null && typeof obj === "object") {
+    const result: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      result[key] = resolveEnvPlaceholders(value)
+    }
+    return result
+  }
+  return obj
 }
 
 /**

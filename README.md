@@ -27,6 +27,17 @@
 }
 ```
 
+也支持通过环境变量注入敏感值（适合容器部署）：
+
+```json
+{
+  "appId": "${FEISHU_APP_ID}",
+  "appSecret": "${FEISHU_APP_SECRET}"
+}
+```
+
+`${VAR_NAME}` 占位符会在启动时从 `process.env` 读取，未设置则报错。明文值直接使用。
+
 ### 3. 配置飞书应用
 
 在 [飞书开放平台](https://open.feishu.cn/app) 创建自建应用，然后：
