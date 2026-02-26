@@ -5,6 +5,7 @@ import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import type { LogFn } from "../types.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
+import { describeMessageType } from "./content-extractor.js"
 
 interface HistoryMessage {
   senderType: string
@@ -87,15 +88,11 @@ async function fetchRecentMessages(
 
       for (const item of items) {
         if (item.deleted) continue
-        if (item.msg_type !== "text" || !item.body?.content) continue
+        if (!item.body?.content) continue
 
-        let text: string
-        try {
-          const parsed = JSON.parse(item.body.content) as { text?: string }
-          text = (parsed.text ?? "").trim()
-        } catch {
-          continue
-        }
+        const msgType = item.msg_type ?? "text"
+        const rawContent = item.body.content
+        const text = describeMessageType(msgType, rawContent)
         if (!text) continue
 
         result.push({

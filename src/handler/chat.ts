@@ -6,6 +6,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk"
 import * as sender from "../feishu/sender.js"
 import { registerPending, unregisterPending } from "./event.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
+import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
 const POLL_INTERVAL_MS = 1500
@@ -20,8 +21,8 @@ export interface ChatDeps {
 }
 
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Promise<void> {
-  const { content, chatId, chatType, senderId, shouldReply } = ctx
-  if (!content.trim()) return
+  const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId } = ctx
+  if (!content.trim() && messageType === "text") return
 
   const { config, client, feishuClient, log, directory } = deps
   const query = directory ? { directory } : undefined
@@ -29,11 +30,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
   const session = await getOrCreateSession(client, sessionKey, directory)
 
-  // 群聊消息添加发送者身份前缀
-  let promptContent = content
-  if (chatType === "group" && senderId) {
-    promptContent = `[${senderId}]: ${content}`
-  }
+  // 提取消息内容为 OpenCode parts
+  const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log)
+  if (!parts.length) return
 
   // 静默监听模式：消息发给 OpenCode 作为上下文，不触发 AI 回复
   if (!shouldReply) {
@@ -42,7 +41,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
         path: { id: session.id },
         query,
         body: {
-          parts: [{ type: "text", text: promptContent }],
+          parts,
           noReply: true,
         },
       })
@@ -77,7 +76,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       path: { id: session.id },
       query,
       body: {
-        parts: [{ type: "text", text: promptContent }],
+        parts,
       },
     })
 
@@ -131,6 +130,40 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     if (timer) clearTimeout(timer)
     unregisterPending(session.id)
   }
+}
+
+/**
+ * 将飞书消息转换为 OpenCode prompt parts
+ * 文本类型添加群聊发送者前缀；其他类型通过 content-extractor 提取
+ */
+async function buildPromptParts(
+  feishuClient: InstanceType<typeof Lark.Client>,
+  messageId: string,
+  messageType: string,
+  rawContent: string,
+  textContent: string,
+  chatType: "p2p" | "group",
+  senderId: string,
+  log: LogFn,
+): Promise<PromptPart[]> {
+  if (messageType === "text") {
+    // 文本消息：沿用原有逻辑，群聊添加发送者前缀
+    let promptText = textContent
+    if (chatType === "group" && senderId) {
+      promptText = `[${senderId}]: ${textContent}`
+    }
+    return [{ type: "text", text: promptText }]
+  }
+
+  // 非文本消息：通过 content-extractor 提取
+  const parts = await extractParts(feishuClient, messageId, messageType, rawContent, log)
+
+  // 群聊非文本消息：在 parts 前添加发送者前缀
+  if (chatType === "group" && senderId && parts.length > 0) {
+    return [{ type: "text", text: `[${senderId}]:` }, ...parts]
+  }
+
+  return parts
 }
 
 function extractLastAssistantText(

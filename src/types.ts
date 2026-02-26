@@ -5,7 +5,10 @@ export interface FeishuMessageContext {
   chatId: string
   messageId: string
   messageType: string
+  /** 提取后的文本内容（text/post 类型），非文本类型可能为空 */
   content: string
+  /** 原始 JSON content 字符串（用于资源下载和内容提取） */
+  rawContent: string
   chatType: "p2p" | "group"
   senderId: string
   rootId?: string

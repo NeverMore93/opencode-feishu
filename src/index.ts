@@ -78,7 +78,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     config: resolvedConfig,
     botOpenId,
     onMessage: async (msgCtx) => {
-      if (!msgCtx.content.trim() || !gateway || !resolvedConfig) return
+      if ((!msgCtx.content.trim() && !msgCtx.rawContent.trim()) || !gateway || !resolvedConfig) return
       await handleChat(msgCtx, {
         config: resolvedConfig,
         client,

@@ -64,23 +64,38 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         if (isDuplicate(messageId)) return
 
         const messageType = (message.message_type as string) ?? "text"
+        const rawContent = (message.content as string) ?? ""
         log("info", "飞书消息元信息", {
           chatId,
           messageId: messageId ?? "",
           messageType,
-          hasContent: !!message.content,
+          hasContent: !!rawContent,
         })
-        if (messageType !== "text" || !message.content) return
+        if (!rawContent) return
 
-        let text: string
-        try {
-          const parsed = JSON.parse(message.content as string) as { text?: string }
-          text = (parsed.text ?? "").trim()
-        } catch {
-          return
+        // 提取文本内容（用于 @提及清理和空消息过滤）
+        let text = ""
+        if (messageType === "text") {
+          try {
+            const parsed = JSON.parse(rawContent) as { text?: string }
+            text = (parsed.text ?? "").trim()
+          } catch {
+            return
+          }
+          text = text.replace(/@_user_\d+\s*/g, "").trim()
+          if (!text) return
+        } else if (messageType === "post") {
+          // 富文本：提取纯文本用于过滤判断
+          try {
+            const parsed = JSON.parse(rawContent) as { title?: string; content?: unknown[][] }
+            text = parsed.title ?? "[富文本消息]"
+          } catch {
+            text = "[富文本消息]"
+          }
+        } else {
+          // 非文本类型：使用类型描述作为 text
+          text = `[${messageType}]`
         }
-        text = text.replace(/@_user_\d+\s*/g, "").trim()
-        if (!text) return
 
         const chatType = (message.chat_type as string) === "group" ? "group" : "p2p"
 
@@ -103,6 +118,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           messageId: messageId ?? "",
           messageType,
           content: text,
+          rawContent,
           chatType,
           senderId,
           rootId,
