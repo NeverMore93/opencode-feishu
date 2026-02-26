@@ -32,28 +32,29 @@ export async function downloadMessageResource(
       params: { type },
     })
 
-    // res 可能包含 data（stream）和 headers
-    const streamData = res as unknown as { data?: NodeJS.ReadableStream; headers?: Record<string, string> }
-    if (!streamData.data) {
+    if (!res) {
       log("warn", "资源下载返回空数据", { messageId, fileKey, type })
       return null
     }
 
+    const stream = res.getReadableStream()
     const chunks: Buffer[] = []
     let totalSize = 0
 
-    for await (const chunk of streamData.data) {
+    for await (const chunk of stream) {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array)
       totalSize += buf.length
       if (totalSize > MAX_RESOURCE_SIZE) {
         log("warn", "资源过大，跳过下载", { messageId, fileKey, totalSize })
+        stream.destroy()
         return null
       }
       chunks.push(buf)
     }
 
     const buffer = Buffer.concat(chunks)
-    const contentType = streamData.headers?.["content-type"] ?? guessMimeByType(type)
+    const headers = res.headers as Record<string, string> | undefined
+    const contentType = headers?.["content-type"] ?? guessMimeByType(type)
     const base64 = buffer.toString("base64")
     const dataUrl = `data:${contentType};base64,${base64}`
 
