@@ -4,6 +4,9 @@
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { request as httpsRequest } from "node:https"
+import { text } from "node:stream/consumers"
+import { HttpsProxyAgent } from "https-proxy-agent"
 import type { Plugin, Hooks } from "@opencode-ai/plugin"
 import type { FeishuPluginConfig, ResolvedConfig, LogFn } from "./types.js"
 import { startFeishuGateway, type FeishuGatewayResult } from "./feishu/gateway.js"
@@ -158,11 +161,46 @@ function resolveEnvPlaceholders(obj: unknown): unknown {
 }
 
 /**
+ * Proxy-aware fetch. Bun's native fetch may ignore HTTPS_PROXY, so when a
+ * proxy is configured we fall back to node:https + HttpsProxyAgent.
+ * Signature mirrors global fetch — callers don't need to care about proxy.
+ */
+function proxyFetch(url: string, init?: RequestInit): Promise<Response> {
+  const proxyUrl =
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.ALL_PROXY ||
+    ""
+  if (!proxyUrl) return fetch(url, init)
+
+  const parsed = new URL(url)
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: init?.method ?? "GET",
+        headers: init?.headers as Record<string, string>,
+        agent: new HttpsProxyAgent(proxyUrl),
+      },
+      (res) => {
+        text(res).then((body) =>
+          resolve(new Response(body, { status: res.statusCode ?? 0 })),
+        ).catch(reject)
+      },
+    )
+    req.on("error", reject)
+    if (init?.body) req.write(init.body)
+    req.end()
+  })
+}
+
+/**
  * 获取 bot 自身的 open_id（用于群聊 @提及检测）
  * 失败时直接抛出错误，阻止插件启动
  */
 async function fetchBotOpenId(appId: string, appSecret: string, log: LogFn): Promise<string> {
-  const tokenRes = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+  const tokenRes = await proxyFetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
@@ -173,7 +211,7 @@ async function fetchBotOpenId(appId: string, appSecret: string, log: LogFn): Pro
     throw new Error("获取 tenant_access_token 失败，无法启动群聊 @提及检测")
   }
 
-  const botRes = await fetch("https://open.feishu.cn/open-apis/bot/v3/info", {
+  const botRes = await proxyFetch("https://open.feishu.cn/open-apis/bot/v3/info", {
     method: "GET",
     headers: { Authorization: `Bearer ${token}` },
   })
