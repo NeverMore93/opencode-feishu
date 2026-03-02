@@ -5,6 +5,7 @@ import * as Lark from "@larksuiteoapi/node-sdk"
 import { ProxyAgent } from "proxy-agent"
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import { isDuplicate } from "./dedup.js"
+import { describeMessageType } from "./content-extractor.js"
 import { isBotMentioned } from "./group-filter.js"
 
 export interface FeishuGatewayOptions {
@@ -74,28 +75,11 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         if (!rawContent) return
 
         // 提取文本内容（用于 @提及清理和空消息过滤）
-        let text = ""
+        let text = describeMessageType(messageType, rawContent)
         if (messageType === "text") {
-          try {
-            const parsed = JSON.parse(rawContent) as { text?: string }
-            text = (parsed.text ?? "").trim()
-          } catch {
-            return
-          }
           text = text.replace(/@_user_\d+\s*/g, "").trim()
-          if (!text) return
-        } else if (messageType === "post") {
-          // 富文本：提取纯文本用于过滤判断
-          try {
-            const parsed = JSON.parse(rawContent) as { title?: string; content?: unknown[][] }
-            text = parsed.title ?? "[富文本消息]"
-          } catch {
-            text = "[富文本消息]"
-          }
-        } else {
-          // 非文本类型：使用类型描述作为 text
-          text = `[${messageType}]`
         }
+        if (!text) return
 
         const chatType = (message.chat_type as string) === "group" ? "group" : "p2p"
 
