@@ -158,7 +158,7 @@ function extractPostText(rawContent: string): string {
           } else if (element.tag === "a" && element.text) {
             segments.push(element.href ? `${element.text}(${element.href})` : element.text)
           } else if (element.tag === "at" && element.text) {
-            // @提及，保留文本
+            segments.push(element.text)
           } else if (element.tag === "img") {
             segments.push("[图片]")
           }

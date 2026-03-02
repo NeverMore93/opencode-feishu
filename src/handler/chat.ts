@@ -62,11 +62,18 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     thinkingDelay > 0
       ? setTimeout(async () => {
           if (done) return
-          const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…")
-          if (done) return // 重新检查，防止发送期间主流程已结束
-          if (res.ok && res.messageId) {
-            placeholderId = res.messageId
-            registerPending(session.id, { chatId, placeholderId, feishuClient })
+          try {
+            const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…")
+            if (done) return // 重新检查，防止发送期间主流程已结束
+            if (res.ok && res.messageId) {
+              placeholderId = res.messageId
+              registerPending(session.id, { chatId, placeholderId, feishuClient })
+            }
+          } catch (err) {
+            log("warn", "发送占位消息失败", {
+              chatId,
+              error: err instanceof Error ? err.message : String(err),
+            })
           }
         }, thinkingDelay)
       : null
