@@ -2,7 +2,7 @@
  * OpenCode 事件处理：通过插件 event 钩子接收事件，更新飞书占位消息
  */
 import type { Event } from "@opencode-ai/sdk"
-import type { LogFn } from "../types.js"
+
 import * as sender from "../feishu/sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
@@ -31,7 +31,6 @@ export function unregisterPending(sessionId: string): void {
  */
 export async function handleEvent(
   event: Event,
-  log: LogFn,
 ): Promise<void> {
   switch (event.type) {
     case "message.part.updated": {
@@ -75,10 +74,7 @@ export async function handleEvent(
       const errMsg = (props.error as Record<string, unknown>)?.message ?? String(props.error)
       const updateRes = await sender.updateMessage(payload.feishuClient, payload.placeholderId, `❌ 会话错误: ${errMsg}`)
       if (!updateRes.ok) {
-        const sendRes = await sender.sendTextMessage(payload.feishuClient, payload.chatId, `❌ 会话错误: ${errMsg}`)
-        if (!sendRes.ok) {
-          log("error", "发送错误消息失败", { sessionId, error: String(errMsg) })
-        }
+        await sender.sendTextMessage(payload.feishuClient, payload.chatId, `❌ 会话错误: ${errMsg}`)
       }
       break
     }

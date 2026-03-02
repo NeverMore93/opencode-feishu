@@ -9,8 +9,6 @@ import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
-const POLL_INTERVAL_MS = 1500
-const STABLE_POLLS = 2
 
 export interface ChatDeps {
   config: ResolvedConfig
@@ -55,6 +53,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
   const timeout = config.timeout
   const thinkingDelay = config.thinkingDelay
+  const pollInterval = config.pollInterval
+  const stablePolls = config.stablePolls
 
   let placeholderId = ""
   let done = false
@@ -92,7 +92,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     let sameCount = 0
 
     while (Date.now() - start < timeout) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+      await new Promise((r) => setTimeout(r, pollInterval))
       const { data: messages } = await client.session.messages({ path: { id: session.id }, query })
       const text = extractLastAssistantText(messages ?? [])
 
@@ -101,7 +101,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
         sameCount = 0
       } else if (text && text.length > 0) {
         sameCount++
-        if (sameCount >= STABLE_POLLS) break
+        if (sameCount >= stablePolls) break
       }
     }
 
@@ -111,27 +111,13 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       lastText ||
       (Date.now() - start >= timeout ? "⚠️ 响应超时" : "[无回复]")
 
-    if (placeholderId) {
-      const res = await sender.updateMessage(feishuClient, placeholderId, finalText)
-      if (!res.ok) {
-        await sender.sendTextMessage(feishuClient, chatId, finalText)
-      }
-    } else {
-      await sender.sendTextMessage(feishuClient, chatId, finalText)
-    }
+    await replyOrUpdate(feishuClient, chatId, placeholderId, finalText)
   } catch (err) {
     log("error", "对话处理失败", {
       error: err instanceof Error ? err.message : String(err),
     })
     const msg = "❌ " + (err instanceof Error ? err.message : String(err))
-    if (placeholderId) {
-      const res = await sender.updateMessage(feishuClient, placeholderId, msg)
-      if (!res.ok) {
-        await sender.sendTextMessage(feishuClient, chatId, msg)
-      }
-    } else {
-      await sender.sendTextMessage(feishuClient, chatId, msg)
-    }
+    await replyOrUpdate(feishuClient, chatId, placeholderId, msg)
   } finally {
     done = true
     if (timer) clearTimeout(timer)
@@ -171,6 +157,22 @@ async function buildPromptParts(
   }
 
   return parts
+}
+
+async function replyOrUpdate(
+  feishuClient: InstanceType<typeof Lark.Client>,
+  chatId: string,
+  placeholderId: string,
+  text: string,
+): Promise<void> {
+  if (placeholderId) {
+    const res = await sender.updateMessage(feishuClient, placeholderId, text)
+    if (!res.ok) {
+      await sender.sendTextMessage(feishuClient, chatId, text)
+    }
+  } else {
+    await sender.sendTextMessage(feishuClient, chatId, text)
+  }
 }
 
 function extractLastAssistantText(

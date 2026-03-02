@@ -1,6 +1,6 @@
 {
   "name": "opencode-feishu",
-  "version": "0.2.0",
+  "version": "0.3.7",
   "description": "OpenCode 飞书插件 — 通过飞书 WebSocket 长连接接入 OpenCode AI 对话",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && npm run typecheck",
+    "release": "bumpp"
   },
   "author": "NeverMore93",
   "repository": {
@@ -30,7 +31,7 @@
   "homepage": "https://github.com/NeverMore93/opencode-feishu#readme",
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.56.1",
-    "proxy-agent": "^6.5.0"
+    "https-proxy-agent": "^7.0.6"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.1.0",
@@ -39,7 +40,8 @@
   "devDependencies": {
     "@opencode-ai/plugin": "^1.1.53",
     "@types/node": "^22.0.0",
-"tsup": "^8.0.0",
+    "bumpp": "^10.4.1",
+    "tsup": "^8.0.0",
     "typescript": "^5.5.0"
   },
   "engines": {

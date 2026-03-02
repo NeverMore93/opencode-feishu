@@ -11,5 +11,6 @@ export default defineConfig({
   splitting: false,
   treeshake: true,
   minify: false,
-  external: ["@opencode-ai/plugin", "@opencode-ai/sdk"],
+  external: ["@opencode-ai/plugin", "@opencode-ai/sdk", "ws"],
+  noExternal: ["@larksuiteoapi/node-sdk"],
 });

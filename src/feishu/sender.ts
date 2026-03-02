@@ -16,7 +16,6 @@ export async function sendTextMessage(
   client: InstanceType<typeof Lark.Client>,
   chatId: string,
   text: string,
-  _replyToId?: string
 ): Promise<FeishuSendResult> {
   if (!chatId?.trim()) {
     return { ok: false, error: "No chat_id provided" };

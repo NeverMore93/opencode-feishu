@@ -1,4 +1,4 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 本文件为 Claude Code (claude.ai/code) 在此代码仓库中工作时提供指导。
 
@@ -45,24 +45,59 @@ npm run dev
 npm run typecheck
 ```
 
-### 安装到 OpenCode（Windows）
-```powershell
-# 构建
+### 发布
+```bash
+# 一键版本发布（交互式选择 patch/minor/major，自动 commit + tag + push）
+npm run release
+
+# 手动发布（prepublishOnly 自动执行构建+类型检查）
+npm publish
+
+# 干运行：查看将要发布的文件（不实际发布）
+npm publish --dry-run
+```
+
+- `prepublishOnly` 脚本确保每次 `npm publish` 前自动运行 `build` 和 `typecheck`
+- `npm run release` 使用 bumpp 交互式选择版本，自动更新 package.json、创建 git commit 和 tag、推送到远程
+- 推送 `v*` tag 后 GitHub Actions 自动发布到 npm（需在 GitHub Secrets 中配置 `NPM_TOKEN`）
+
+### 本地调试
+```bash
+# 启用调试模式（日志输出到 stderr）
+FEISHU_DEBUG=1 opencode
+
+# 配合 Lark SDK 详细日志（feishu.json 中设置 "logLevel": "debug"）
+FEISHU_DEBUG=1 opencode
+
+# 过滤错误日志
+FEISHU_DEBUG=1 opencode 2>&1 | grep '"level":"error"'
+
+# 重定向到文件
+FEISHU_DEBUG=1 opencode 2>feishu-debug.log
+```
+
+- `FEISHU_DEBUG=1`：启用 console.error 结构化 JSON 输出（不影响 stdout 管道）
+- `feishu.json` 中 `logLevel`：控制 Lark SDK 内部日志详细程度（`fatal`/`error`/`warn`/`info`/`debug`/`trace`）
+- 不设 `FEISHU_DEBUG` 时行为与之前完全一致（无 console 输出）
+
+### 安装到 OpenCode
+
+**1. 构建插件：**
+```bash
 npm run build
+```
 
-# 创建目录链接（junction，不需要管理员权限）
-$source = Get-Location
-$target = "$env:USERPROFILE\.config\opencode\plugins\opencode-feishu"
-New-Item -ItemType Junction -Path $target -Target $source
+**2. 在 `opencode.json` 中声明插件（使用项目绝对路径）：**
+```json
+{ "plugin": ["D:/path/to/opencode-feishu"] }
+```
 
-# 在 opencode.json 中配置
-# {
-#   "plugin": ["opencode-feishu"],
-#   "feishu": {
-#     "appId": "cli_xxxxxxxxxxxx",
-#     "appSecret": "your_secret"
-#   }
-# }
+> OpenCode 插件系统会将路径转换为 `file:///` 协议直接加载 `dist/index.js`。
+> 不要使用包名（如 `"opencode-feishu"`），Windows 上 Bun 安装存在 EPERM 权限问题。
+
+**3. 创建飞书配置文件** `~/.config/opencode/plugins/feishu.json`：
+```json
+{ "appId": "cli_xxxxxxxxxxxx", "appSecret": "your_secret" }
 ```
 
 ## 架构设计
@@ -122,25 +157,25 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ## 配置
 
-### 在 OpenCode 配置文件中配置
+### 配置文件
+
+**1. OpenCode 插件声明**（`~/.config/opencode/opencode.json`）：
 ```json
-// ~/.config/opencode/opencode.json
+{ "plugin": ["opencode-feishu"] }
+```
+
+**2. 飞书配置**（`~/.config/opencode/plugins/feishu.json`）：
+```json
 {
-  "plugin": ["opencode-feishu"],
-  "feishu": {
-    "appId": "cli_xxxxxxxxxxxx",
-    "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "timeout": 120000,
-    "thinkingDelay": 2500,
-    "enableStreaming": true,
-    "reconnectDelay": 5000,
-    "dedupWindow": 600000
-  }
+  "appId": "cli_xxxxxxxxxxxx",
+  "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "timeout": 120000,
+  "thinkingDelay": 2500
 }
 ```
 
-必需字段：`feishu.appId`, `feishu.appSecret`
-可选字段均有默认值（见上）。
+必需字段：`appId`, `appSecret`
+可选字段：`timeout`（默认 120000ms）、`thinkingDelay`（默认 2500ms）、`logLevel`（默认 `"info"`，控制 Lark SDK 日志级别）
 
 ## 群聊行为
 
@@ -151,7 +186,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ### @提及检测
 - 需要 bot 的 `open_id`（通过 `/open-apis/bot/v3/info` 获取）
-- 获取失败时使用回退模式：任何 @提及都触发回复
+- 获取失败时直接抛出错误，阻止插件启动（严格模式）
 - 检测逻辑在 `src/feishu/group-filter.ts`
 
 ### 入群历史摄入
@@ -193,7 +228,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ## 错误处理
 
-- `open_id` 获取失败：回退到宽松的 @提及检测（记录警告）
+- `open_id` 获取失败：直接抛出错误，阻止插件启动
 - 提示超时：`timeout` 后返回"⚠️ 响应超时"
 - 消息去重：10 分钟窗口防止重复处理
 - 飞书消息发送失败：尽力更新占位消息，回退到发送新消息
@@ -202,10 +237,11 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ## 日志记录
 
-- 通过 `client.app.log()` 输出到 OpenCode 日志系统
+- 通过 `client.app.log()` 输出到 OpenCode 日志系统（主日志通道）
+- 设置 `FEISHU_DEBUG=1` 环境变量时同时输出结构化 JSON 到 stderr（调试用）
 - 服务标识："opencode-feishu"
 - 级别：info、warn、error
-- fallback：OpenCode 日志不可用时降级到 console
+- 日志调用使用 `.catch(() => {})` 静默处理失败（防止 Unhandled Promise Rejection）
 
 ## 常见开发场景
 

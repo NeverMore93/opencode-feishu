@@ -12,7 +12,5 @@ export function isBotMentioned(
   mentions: Array<{ id?: { open_id?: string }; [key: string]: unknown }>,
   botOpenId: string
 ): boolean {
-  // fallback: 若启动时未能获取 bot open_id，只要有任何 @提及就回复
-  if (!botOpenId) return mentions.length > 0;
   return mentions.some((m) => m.id?.open_id === botOpenId);
 }

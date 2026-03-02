@@ -31,9 +31,6 @@ export async function getOrCreateSession(
     )
     if (candidates.length > 0) {
       candidates.sort((a, b) => {
-        const tsA = parseInt(a.title?.split("-").pop() ?? "0", 10)
-        const tsB = parseInt(b.title?.split("-").pop() ?? "0", 10)
-        if (tsA && tsB) return tsB - tsA
         const ca = a.time?.created ?? 0
         const cb = b.time?.created ?? 0
         return cb - ca
