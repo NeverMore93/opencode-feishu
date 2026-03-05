@@ -66,9 +66,10 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   }
 
   if (feishuRaw.directory !== undefined && typeof feishuRaw.directory !== "string") {
-    throw new Error(
-      `飞书配置错误：${configPath} 中的 'directory' 必须是字符串`,
-    )
+    log("warn", `飞书配置警告：${configPath} 中的 'directory' 必须是字符串，已忽略`, {
+      actualType: typeof feishuRaw.directory,
+    })
+    feishuRaw.directory = undefined
   }
 
   if (!feishuRaw.appId || !feishuRaw.appSecret) {
@@ -147,13 +148,11 @@ export const FeishuPlugin: Plugin = async (ctx) => {
 function expandDirectoryPath(dir: string): string {
   if (!dir) return dir
   // 展开 ~ 为用户主目录
-  if (dir === "~") return homedir()
-  if (dir.startsWith("~/") || dir.startsWith("~\\")) {
-    dir = join(homedir(), dir.slice(2))
+  if (dir.startsWith("~")) {
+    dir = join(homedir(), dir.slice(1))
   }
   // 展开 $VAR（无花括号）— ${VAR} 已由 resolveEnvPlaceholders 处理
   dir = dir.replace(/\$(\w+)/g, (_match, name: string) => {
-    // 跳过已被 resolveEnvPlaceholders 处理的 ${VAR} 形式（不应出现，但防御性处理）
     const val = process.env[name]
     if (val === undefined) {
       throw new Error(`环境变量 ${name} 未设置（directory 引用了 $${name}）`)
