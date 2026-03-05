@@ -151,11 +151,12 @@ function expandDirectoryPath(dir: string): string {
   if (dir.startsWith("~")) {
     dir = join(homedir(), dir.slice(1))
   }
-  // 展开 $VAR（无花括号）— ${VAR} 已由 resolveEnvPlaceholders 处理
-  dir = dir.replace(/\$(\w+)/g, (_match, name: string) => {
+  // 统一处理 $VAR 和 ${VAR} 两种语法的环境变量展开
+  dir = dir.replace(/\$(?:(\w+)|\{(\w+)\})/g, (_match, n1: string, n2: string) => {
+    const name = n1 || n2
     const val = process.env[name]
     if (val === undefined) {
-      throw new Error(`环境变量 ${name} 未设置（directory 引用了 $${name}）`)
+      throw new Error(`环境变量 ${name} 未设置（directory 引用了它）`)
     }
     return val
   })
