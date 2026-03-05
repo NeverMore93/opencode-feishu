@@ -143,7 +143,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
 
 /**
  * 展开 directory 路径中的环境变量和 ~ 前缀。
- * 支持 $VAR、${VAR} 和 ~ 三种语法。
+ * 支持 ${VAR} 和 ~ 两种语法。
  */
 function expandDirectoryPath(dir: string): string {
   if (!dir) return dir
@@ -151,12 +151,11 @@ function expandDirectoryPath(dir: string): string {
   if (dir.startsWith("~")) {
     dir = join(homedir(), dir.slice(1))
   }
-  // 统一处理 $VAR 和 ${VAR} 两种语法的环境变量展开
-  dir = dir.replace(/\$(?:(\w+)|\{(\w+)\})/g, (_match, n1: string, n2: string) => {
-    const name = n1 || n2
+  // 展开 ${VAR} 环境变量（不支持 $VAR 无花括号语法，避免与路径中 $ 字符歧义）
+  dir = dir.replace(/\$\{(\w+)\}/g, (_match, name: string) => {
     const val = process.env[name]
     if (val === undefined) {
-      throw new Error(`环境变量 ${name} 未设置（directory 引用了它）`)
+      throw new Error(`环境变量 ${name} 未设置（directory 引用了 \${${name}}）`)
     }
     return val
   })
