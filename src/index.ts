@@ -26,6 +26,7 @@ const DEFAULT_CONFIG: Omit<ResolvedConfig, "appId" | "appSecret"> = {
   pollInterval: 1_000,
   stablePolls: 3,
   dedupTtl: 10 * 60 * 1_000,
+  directory: "",
 }
 
 export const FeishuPlugin: Plugin = async (ctx) => {
@@ -80,6 +81,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     pollInterval: feishuRaw.pollInterval ?? DEFAULT_CONFIG.pollInterval,
     stablePolls: feishuRaw.stablePolls ?? DEFAULT_CONFIG.stablePolls,
     dedupTtl: feishuRaw.dedupTtl ?? DEFAULT_CONFIG.dedupTtl,
+    directory: feishuRaw.directory ?? ctx.directory ?? DEFAULT_CONFIG.directory,
   }
 
   // 初始化去重缓存
@@ -99,7 +101,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
         client,
         feishuClient: gateway.client,
         log,
-        directory: ctx.directory,
+        directory: resolvedConfig.directory,
       })
     },
     onBotAdded: (chatId) => {
@@ -107,6 +109,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
       ingestGroupHistory(gateway.client, client, chatId, {
         maxMessages: resolvedConfig.maxHistoryMessages,
         log,
+        directory: resolvedConfig.directory,
       }).catch((err) => {
         log("error", "群聊历史摄入失败", {
           chatId,

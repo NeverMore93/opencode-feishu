@@ -26,9 +26,11 @@ export async function ingestGroupHistory(
   options: {
     maxMessages: number
     log: LogFn
+    directory?: string
   },
 ): Promise<void> {
-  const { maxMessages, log } = options
+  const { maxMessages, log, directory } = options
+  const query = directory ? { directory } : undefined
 
   log("info", "开始摄入群聊历史上下文", { chatId, maxMessages })
 
@@ -41,7 +43,7 @@ export async function ingestGroupHistory(
 
   // 2. 获取/创建 OpenCode 会话
   const sessionKey = buildSessionKey("group", chatId)
-  const session = await getOrCreateSession(opencodeClient, sessionKey)
+  const session = await getOrCreateSession(opencodeClient, sessionKey, directory)
 
   // 3. 格式化为上下文文本
   const contextText = formatHistoryAsContext(messages)
@@ -49,6 +51,7 @@ export async function ingestGroupHistory(
   // 4. 发送到 OpenCode（noReply: true，仅记录上下文，不触发 AI 回复）
   await opencodeClient.session.prompt({
     path: { id: session.id },
+    query,
     body: {
       parts: [{ type: "text", text: contextText }],
       noReply: true,
