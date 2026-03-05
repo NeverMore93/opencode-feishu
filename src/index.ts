@@ -87,7 +87,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     pollInterval: feishuRaw.pollInterval ?? DEFAULT_CONFIG.pollInterval,
     stablePolls: feishuRaw.stablePolls ?? DEFAULT_CONFIG.stablePolls,
     dedupTtl: feishuRaw.dedupTtl ?? DEFAULT_CONFIG.dedupTtl,
-    directory: feishuRaw.directory ?? ctx.directory ?? DEFAULT_CONFIG.directory,
+    directory: expandDirectoryPath(feishuRaw.directory ?? ctx.directory ?? DEFAULT_CONFIG.directory),
   }
 
   // 初始化去重缓存
@@ -138,6 +138,29 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     },
   }
   return hooks
+}
+
+/**
+ * 展开 directory 路径中的环境变量和 ~ 前缀。
+ * 支持 $VAR、${VAR} 和 ~ 三种语法。
+ */
+function expandDirectoryPath(dir: string): string {
+  if (!dir) return dir
+  // 展开 ~ 为用户主目录
+  if (dir === "~") return homedir()
+  if (dir.startsWith("~/") || dir.startsWith("~\\")) {
+    dir = join(homedir(), dir.slice(2))
+  }
+  // 展开 $VAR（无花括号）— ${VAR} 已由 resolveEnvPlaceholders 处理
+  dir = dir.replace(/\$(\w+)/g, (_match, name: string) => {
+    // 跳过已被 resolveEnvPlaceholders 处理的 ${VAR} 形式（不应出现，但防御性处理）
+    const val = process.env[name]
+    if (val === undefined) {
+      throw new Error(`环境变量 ${name} 未设置（directory 引用了 $${name}）`)
+    }
+    return val
+  })
+  return dir
 }
 
 /**
