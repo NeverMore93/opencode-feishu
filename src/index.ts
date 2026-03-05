@@ -65,6 +65,12 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     throw new Error(`飞书配置文件格式错误：${configPath} 必须是合法的 JSON (${parseErr})`)
   }
 
+  if (feishuRaw.directory !== undefined && typeof feishuRaw.directory !== "string") {
+    throw new Error(
+      `飞书配置错误：${configPath} 中的 'directory' 必须是字符串`,
+    )
+  }
+
   if (!feishuRaw.appId || !feishuRaw.appSecret) {
     throw new Error(
       `飞书配置不完整：${configPath} 中必须包含 appId 和 appSecret`,
