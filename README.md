@@ -72,6 +72,10 @@ opencode
 | `stablePolls` | number | 否 | `3` | 连续几次轮询内容不变视为回复完成 |
 | `dedupTtl` | number | 否 | `600000` | 消息去重缓存过期时间（毫秒） |
 | `directory` | string | 否 | `""` | 默认工作目录，支持 `~` 和 `${ENV_VAR}` 展开 |
+| `autoPrompt.enabled` | boolean | 否 | `false` | 启用自动提示（响应完成后自动发送"继续"） |
+| `autoPrompt.intervalSeconds` | number | 否 | `30` | 响应完成后等待秒数 |
+| `autoPrompt.maxIterations` | number | 否 | `10` | 单轮对话最大自动提示次数 |
+| `autoPrompt.message` | string | 否 | `"请同步当前进度，如需帮助请说明"` | 自动发送的提示内容 |
 
 ## 特性
 
@@ -81,6 +85,7 @@ opencode
 - **入群自动摄入历史消息**
 - **代理支持** — `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`
 - **消息去重** — 可配置 TTL
+- **自动提示** — 响应完成后自动发送"继续"，推动 OpenCode 持续工作；用户发新消息自动中断
 
 ## 群聊行为
 

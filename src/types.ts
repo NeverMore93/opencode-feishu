@@ -37,6 +37,13 @@ export interface FeishuPluginConfig {
   dedupTtl?: number
   /** 默认工作目录（覆盖 OpenCode 插件上下文的 directory） */
   directory?: string
+  /** 自动提示配置：响应完成后自动发送"继续"推动 OpenCode 持续工作 */
+  autoPrompt?: {
+    enabled?: boolean
+    intervalSeconds?: number
+    maxIterations?: number
+    message?: string
+  }
 }
 
 /**
@@ -53,6 +60,12 @@ export interface ResolvedConfig {
   stablePolls: number
   dedupTtl: number
   directory: string
+  autoPrompt: {
+    enabled: boolean
+    intervalSeconds: number
+    maxIterations: number
+    message: string
+  }
 }
 
 /**

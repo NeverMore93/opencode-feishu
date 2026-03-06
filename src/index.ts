@@ -27,6 +27,12 @@ const DEFAULT_CONFIG: Omit<ResolvedConfig, "appId" | "appSecret"> = {
   stablePolls: 3,
   dedupTtl: 10 * 60 * 1_000,
   directory: "",
+  autoPrompt: {
+    enabled: false,
+    intervalSeconds: 30,
+    maxIterations: 10,
+    message: "请同步当前进度，如需帮助请说明",
+  },
 }
 
 export const FeishuPlugin: Plugin = async (ctx) => {
@@ -89,6 +95,12 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     stablePolls: feishuRaw.stablePolls ?? DEFAULT_CONFIG.stablePolls,
     dedupTtl: feishuRaw.dedupTtl ?? DEFAULT_CONFIG.dedupTtl,
     directory: expandDirectoryPath(feishuRaw.directory ?? ctx.directory ?? DEFAULT_CONFIG.directory),
+    autoPrompt: {
+      enabled: feishuRaw.autoPrompt?.enabled ?? DEFAULT_CONFIG.autoPrompt.enabled,
+      intervalSeconds: feishuRaw.autoPrompt?.intervalSeconds ?? DEFAULT_CONFIG.autoPrompt.intervalSeconds,
+      maxIterations: feishuRaw.autoPrompt?.maxIterations ?? DEFAULT_CONFIG.autoPrompt.maxIterations,
+      message: feishuRaw.autoPrompt?.message ?? DEFAULT_CONFIG.autoPrompt.message,
+    },
   }
 
   // 初始化去重缓存

@@ -9,6 +9,8 @@ import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
+/** 每个会话的活跃自动提示循环，用于用户介入时中断 */
+const activeAutoPrompts = new Map<string, AbortController>()
 
 export interface ChatDeps {
   config: ResolvedConfig
@@ -26,6 +28,14 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   const query = directory ? { directory } : undefined
 
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
+
+  // 用户发新消息时中断该会话的自动提示循环
+  const existing = activeAutoPrompts.get(sessionKey)
+  if (existing) {
+    existing.abort()
+    activeAutoPrompts.delete(sessionKey)
+    log("info", "用户介入，自动提示已中断", { sessionKey })
+  }
 
   const session = await getOrCreateSession(client, sessionKey, directory)
 
@@ -113,6 +123,68 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       (Date.now() - start >= timeout ? "⚠️ 响应超时" : "[无回复]")
 
     await replyOrUpdate(feishuClient, chatId, placeholderId, finalText)
+
+    // 自动提示循环：响应完成后自动发送"继续"推动 OpenCode 持续工作
+    const { autoPrompt } = config
+    if (autoPrompt.enabled && shouldReply) {
+      const ac = new AbortController()
+      activeAutoPrompts.set(sessionKey, ac)
+      log("info", "启动自动提示循环", { sessionKey, maxIterations: autoPrompt.maxIterations })
+
+      try {
+        for (let i = 0; i < autoPrompt.maxIterations; i++) {
+          // 等待指定间隔（可被 abort 中断）
+          await abortableSleep(autoPrompt.intervalSeconds * 1000, ac.signal)
+
+          log("info", "发送自动提示", { sessionKey, iteration: i + 1 })
+
+          await client.session.prompt({
+            path: { id: session.id },
+            query,
+            body: { parts: [{ type: "text", text: autoPrompt.message }] },
+          })
+
+          // 轮询等待本次响应完成
+          const iterStart = Date.now()
+          let iterLastText = ""
+          let iterSameCount = 0
+
+          while (Date.now() - iterStart < timeout) {
+            await abortableSleep(pollInterval, ac.signal)
+            const { data: msgs } = await client.session.messages({ path: { id: session.id }, query })
+            const t = extractLastAssistantText(msgs ?? [])
+
+            if (t && t !== iterLastText) {
+              iterLastText = t
+              iterSameCount = 0
+            } else if (t && t.length > 0) {
+              iterSameCount++
+              if (iterSameCount >= stablePolls) break
+            }
+          }
+
+          // 发送本次响应到飞书
+          const { data: iterFinalMsgs } = await client.session.messages({ path: { id: session.id }, query })
+          const iterFinalText = extractLastAssistantText(iterFinalMsgs ?? []) || iterLastText || ""
+          if (iterFinalText) {
+            await sender.sendTextMessage(feishuClient, chatId, iterFinalText)
+          }
+        }
+
+        log("info", "自动提示循环结束（达到最大次数）", { sessionKey })
+      } catch (err) {
+        if ((err as Error).name === "AbortError") {
+          log("info", "自动提示循环被中断", { sessionKey })
+        } else {
+          log("error", "自动提示循环异常", {
+            sessionKey,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      } finally {
+        activeAutoPrompts.delete(sessionKey)
+      }
+    }
   } catch (err) {
     log("error", "对话处理失败", {
       error: err instanceof Error ? err.message : String(err),
@@ -174,6 +246,31 @@ async function replyOrUpdate(
   } else {
     await sender.sendTextMessage(feishuClient, chatId, text)
   }
+}
+
+/**
+ * 可被 AbortSignal 中断的 sleep
+ */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"))
+      return
+    }
+    const onDone = () => {
+      clearTimeout(timer)
+      signal.removeEventListener("abort", onAbort)
+    }
+    const onAbort = () => {
+      onDone()
+      reject(new DOMException("Aborted", "AbortError"))
+    }
+    const timer = setTimeout(() => {
+      onDone()
+      resolve()
+    }, ms)
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
 }
 
 function extractLastAssistantText(

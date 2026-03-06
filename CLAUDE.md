@@ -137,6 +137,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 会话标题格式：`Feishu-<sessionKey>-<timestamp>`
 - 静默监听模式：`noReply: true`
 - 主动回复模式：占位消息 → 轮询 → 最终回复
+- 自动提示模式：响应完成后循环发送"继续" → 轮询 → 回复，直到 maxIterations 或用户中断
 
 **事件处理器 (`src/handler/event.ts`):**
 - 处理 `message.part.updated` 实时更新占位消息
@@ -176,6 +177,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 必需字段：`appId`, `appSecret`
 可选字段：`timeout`（默认 120000ms）、`thinkingDelay`（默认 2500ms）、`logLevel`（默认 `"info"`，控制 Lark SDK 日志级别）
+自动提示：`autoPrompt` 对象 — `enabled`（默认 false）、`intervalSeconds`（默认 30）、`maxIterations`（默认 10）、`message`（默认 "请同步当前进度，如需帮助请说明"）
 
 ## 群聊行为
 
@@ -202,6 +204,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 | 群聊 + 被 @提及 | 是 | 否 | 是 |
 | 群聊 + 未被 @提及 | 是 | **是** | **否** |
 | Bot 加入群（历史） | 是 | **是** | **否** |
+| 自动提示循环 | 是（"继续"） | 否 | 是（每次响应） |
 
 ## TypeScript 配置
 
