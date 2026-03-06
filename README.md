@@ -71,6 +71,16 @@ opencode
 | `pollInterval` | number | 否 | `1000` | 轮询 AI 响应的间隔（毫秒） |
 | `stablePolls` | number | 否 | `3` | 连续几次轮询内容不变视为回复完成 |
 | `dedupTtl` | number | 否 | `600000` | 消息去重缓存过期时间（毫秒） |
+| `directory` | string | 否 | `""` | 默认工作目录，支持 `~` 和 `${ENV_VAR}` 展开 |
+
+## 特性
+
+- **多媒体消息支持** — 图片、文件、音频、富文本、卡片等，自动下载为 data URL
+- **实时流式更新** — 通过 `message.part.updated` 事件更新占位消息
+- **群聊静默监听** — 所有群消息作为上下文积累，仅 @提及时回复
+- **入群自动摄入历史消息**
+- **代理支持** — `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`
+- **消息去重** — 可配置 TTL
 
 ## 群聊行为
 
@@ -84,11 +94,26 @@ opencode
 ## 开发
 
 ```bash
-npm install        # 安装依赖
-npm run build      # 构建
-npm run dev        # 开发模式（监听变更）
-npm run typecheck  # 类型检查
-npm publish        # 发布到 npm
+npm install           # 安装依赖
+npm run build         # 构建
+npm run dev           # 开发模式（监听变更）
+npm run typecheck     # 类型检查
+npm run release       # 交互式版本发布（bumpp：选版本 → commit → tag → push）
+npm publish           # 发布到 npm（自动先构建+类型检查）
+npm publish --dry-run # 预览将要发布的内容
+```
+
+## 调试
+
+```bash
+# 启用调试日志（结构化 JSON 输出到 stderr）
+FEISHU_DEBUG=1 opencode
+
+# 过滤错误日志
+FEISHU_DEBUG=1 opencode 2>&1 | grep '"level":"error"'
+
+# 重定向到文件
+FEISHU_DEBUG=1 opencode 2>feishu-debug.log
 ```
 
 ## 许可证

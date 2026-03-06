@@ -26,6 +26,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   const query = directory ? { directory } : undefined
 
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
+
   const session = await getOrCreateSession(client, sessionKey, directory)
 
   // 提取消息内容为 OpenCode parts
