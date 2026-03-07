@@ -24,6 +24,7 @@
 ### 开发规范
 - **当前项目不需要单测** - 专注功能实现和集成测试
 - **所有文档包括 .specify 目录下尽量用中文编写**
+- **任何变更先改版本号** - bump 版本 → commit → tag → push，通过 PR 合并到 main
 
 详细项目约定参见：`.specify/memory/constitution.md`
 
