@@ -96,10 +96,8 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     dedupTtl: feishuRaw.dedupTtl ?? DEFAULT_CONFIG.dedupTtl,
     directory: expandDirectoryPath(feishuRaw.directory ?? ctx.directory ?? DEFAULT_CONFIG.directory),
     autoPrompt: {
-      enabled: feishuRaw.autoPrompt?.enabled ?? DEFAULT_CONFIG.autoPrompt.enabled,
-      intervalSeconds: feishuRaw.autoPrompt?.intervalSeconds ?? DEFAULT_CONFIG.autoPrompt.intervalSeconds,
-      maxIterations: feishuRaw.autoPrompt?.maxIterations ?? DEFAULT_CONFIG.autoPrompt.maxIterations,
-      message: feishuRaw.autoPrompt?.message ?? DEFAULT_CONFIG.autoPrompt.message,
+      ...DEFAULT_CONFIG.autoPrompt,
+      ...(feishuRaw.autoPrompt ?? {}),
     },
   }
 
