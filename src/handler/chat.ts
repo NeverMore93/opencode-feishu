@@ -98,31 +98,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       },
     })
 
-    const start = Date.now()
-    let lastText = ""
-    let sameCount = 0
+    const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query })
 
-    while (Date.now() - start < timeout) {
-      await new Promise((r) => setTimeout(r, pollInterval))
-      const { data: messages } = await client.session.messages({ path: { id: session.id }, query })
-      const text = extractLastAssistantText(messages ?? [])
-
-      if (text && text !== lastText) {
-        lastText = text
-        sameCount = 0
-      } else if (text && text.length > 0) {
-        sameCount++
-        if (sameCount >= stablePolls) break
-      }
-    }
-
-    const { data: finalMessages } = await client.session.messages({ path: { id: session.id }, query })
-    const finalText =
-      extractLastAssistantText(finalMessages ?? []) ||
-      lastText ||
-      (Date.now() - start >= timeout ? "⚠️ 响应超时" : "[无回复]")
-
-    await replyOrUpdate(feishuClient, chatId, placeholderId, finalText)
+    await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
     // 自动提示循环：响应完成后自动发送"继续"推动 OpenCode 持续工作
     const { autoPrompt } = config
@@ -133,7 +111,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
       try {
         for (let i = 0; i < autoPrompt.maxIterations; i++) {
-          // 等待指定间隔（可被 abort 中断）
           await abortableSleep(autoPrompt.intervalSeconds * 1000, ac.signal)
 
           log("info", "发送自动提示", { sessionKey, iteration: i + 1 })
@@ -144,30 +121,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
             body: { parts: [{ type: "text", text: autoPrompt.message }] },
           })
 
-          // 轮询等待本次响应完成
-          const iterStart = Date.now()
-          let iterLastText = ""
-          let iterSameCount = 0
-
-          while (Date.now() - iterStart < timeout) {
-            await abortableSleep(pollInterval, ac.signal)
-            const { data: msgs } = await client.session.messages({ path: { id: session.id }, query })
-            const t = extractLastAssistantText(msgs ?? [])
-
-            if (t && t !== iterLastText) {
-              iterLastText = t
-              iterSameCount = 0
-            } else if (t && t.length > 0) {
-              iterSameCount++
-              if (iterSameCount >= stablePolls) break
-            }
-          }
-
-          // 发送本次响应到飞书
-          const { data: iterFinalMsgs } = await client.session.messages({ path: { id: session.id }, query })
-          const iterFinalText = extractLastAssistantText(iterFinalMsgs ?? []) || iterLastText || ""
-          if (iterFinalText) {
-            await sender.sendTextMessage(feishuClient, chatId, iterFinalText)
+          const text = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query, signal: ac.signal })
+          if (text) {
+            await sender.sendTextMessage(feishuClient, chatId, text)
           }
         }
 
@@ -230,6 +186,47 @@ async function buildPromptParts(
   }
 
   return parts
+}
+
+/**
+ * 轮询等待 AI 响应稳定，返回最终文本
+ */
+async function pollForResponse(
+  client: OpencodeClient,
+  sessionId: string,
+  opts: {
+    timeout: number
+    pollInterval: number
+    stablePolls: number
+    query?: { directory: string }
+    signal?: AbortSignal
+  },
+): Promise<string> {
+  const { timeout, pollInterval, stablePolls, query, signal } = opts
+  const start = Date.now()
+  let lastText = ""
+  let sameCount = 0
+
+  while (Date.now() - start < timeout) {
+    if (signal) {
+      await abortableSleep(pollInterval, signal)
+    } else {
+      await new Promise((r) => setTimeout(r, pollInterval))
+    }
+    const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
+    const text = extractLastAssistantText(messages ?? [])
+
+    if (text && text !== lastText) {
+      lastText = text
+      sameCount = 0
+    } else if (text && text.length > 0) {
+      sameCount++
+      if (sameCount >= stablePolls) break
+    }
+  }
+
+  const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
+  return extractLastAssistantText(finalMessages ?? []) || lastText
 }
 
 async function replyOrUpdate(
