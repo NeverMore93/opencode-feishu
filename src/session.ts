@@ -4,7 +4,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
 
 const SESSION_KEY_PREFIX = "feishu"
-const TITLE_PREFIX = "Feishu"
+export const TITLE_PREFIX = "Feishu"
 
 /**
  * 构建会话键
@@ -49,4 +49,34 @@ export async function getOrCreateSession(
     )
   }
   return { id: createResp.data.id, title: createResp.data.title }
+}
+
+/**
+ * Fork 旧会话并更新标题，用于模型不兼容时的自动恢复
+ */
+export async function forkSession(
+  client: OpencodeClient,
+  oldSessionId: string,
+  sessionKey: string,
+  directory?: string,
+): Promise<{ id: string; title?: string }> {
+  const query = directory ? { directory } : undefined
+  const resp = await client.session.fork({
+    path: { id: oldSessionId },
+    query,
+    body: {},
+  })
+  if (!resp?.data?.id) {
+    throw new Error(
+      `Fork 会话失败: ${JSON.stringify((resp as unknown as { error?: unknown })?.error ?? "unknown")}`,
+    )
+  }
+  // fork 后更新标题，使后续查找能匹配到新会话
+  const title = `${TITLE_PREFIX}-${sessionKey}-${Date.now()}`
+  await client.session.update({
+    path: { id: resp.data.id },
+    query,
+    body: { title },
+  })
+  return { id: resp.data.id, title }
 }
