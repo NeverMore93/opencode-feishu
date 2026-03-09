@@ -46,28 +46,14 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   // 静默监听模式：消息发给 OpenCode 作为上下文，不触发 AI 回复
   if (!shouldReply) {
     try {
-      await client.session.prompt({
-        path: { id: session.id },
-        query,
-        body: {
-          parts,
-          noReply: true,
-        },
+      session = await promptWithForkRecovery({
+        client, session, sessionKey, directory, query, log,
+        body: { parts, noReply: true },
       })
     } catch (err) {
-      if (isModelNotFoundError(err)) {
-        log("warn", "静默模式会话模型不兼容，fork 旧会话重试", { oldSessionId: session.id })
-        session = await forkSession(client, session.id, sessionKey, directory)
-        await client.session.prompt({
-          path: { id: session.id },
-          query,
-          body: { parts, noReply: true },
-        })
-      } else {
-        log("warn", "静默转发失败", {
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
+      log("warn", "静默转发失败", {
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
     return
   }
@@ -100,28 +86,10 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       : null
 
   try {
-    try {
-      await client.session.prompt({
-        path: { id: session.id },
-        query,
-        body: { parts },
-      })
-    } catch (promptErr) {
-      if (isModelNotFoundError(promptErr)) {
-        log("warn", "会话模型不兼容，fork 旧会话重试", {
-          oldSessionId: session.id,
-          error: promptErr instanceof Error ? promptErr.message : String(promptErr),
-        })
-        session = await forkSession(client, session.id, sessionKey, directory)
-        await client.session.prompt({
-          path: { id: session.id },
-          query,
-          body: { parts },
-        })
-      } else {
-        throw promptErr
-      }
-    }
+    session = await promptWithForkRecovery({
+      client, session, sessionKey, directory, query, log,
+      body: { parts },
+    })
 
     const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query })
 
@@ -298,6 +266,31 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 function isModelNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
   return msg.includes("ProviderModelNotFound") || msg.includes("ModelNotFound")
+}
+
+/**
+ * 发送 prompt，检测模型不兼容时自动 fork 旧会话并重试（单次）
+ */
+async function promptWithForkRecovery(opts: {
+  client: OpencodeClient
+  session: { id: string; title?: string }
+  sessionKey: string
+  directory: string
+  query?: { directory: string }
+  log: LogFn
+  body: { parts: PromptPart[]; noReply?: boolean }
+}): Promise<{ id: string; title?: string }> {
+  const { client, sessionKey, directory, query, log, body } = opts
+  let { session } = opts
+  try {
+    await client.session.prompt({ path: { id: session.id }, query, body })
+  } catch (err) {
+    if (!isModelNotFoundError(err)) throw err
+    log("warn", "会话模型不兼容，fork 旧会话重试", { oldSessionId: session.id })
+    session = await forkSession(client, session.id, sessionKey, directory)
+    await client.session.prompt({ path: { id: session.id }, query, body })
+  }
+  return session
 }
 
 function extractLastAssistantText(
