@@ -4,7 +4,7 @@
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import * as sender from "../feishu/sender.js"
-import { registerPending, unregisterPending } from "./event.js"
+import { registerPending, unregisterPending, consumeSessionError } from "./event.js"
 import { buildSessionKey, getOrCreateSession, forkSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
@@ -273,9 +273,13 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-function isModelNotFoundError(err: unknown): boolean {
+function isModelNotFoundError(err: unknown, sessionId: string): boolean {
   const msg = err instanceof Error ? err.message : String(err)
-  return msg.includes("ProviderModelNotFound") || msg.includes("ModelNotFound")
+  // 直接匹配：SDK 直接返回模型不兼容错误
+  if (msg.includes("ProviderModelNotFound") || msg.includes("ModelNotFound")) return true
+  // 间接匹配：SDK 返回 JSON Parse error，但 session.error 事件已追踪到真实错误
+  const tracked = consumeSessionError(sessionId)
+  return !!tracked
 }
 
 /**
@@ -297,7 +301,7 @@ async function promptWithForkRecovery(opts: {
   try {
     await doPrompt(session)
   } catch (err) {
-    if (!isModelNotFoundError(err)) throw err
+    if (!isModelNotFoundError(err, session.id)) throw err
     log("warn", "会话模型不兼容，fork 旧会话重试", { oldSessionId: session.id })
     session = await forkSession(client, session.id, sessionKey, directory)
     await doPrompt(session)

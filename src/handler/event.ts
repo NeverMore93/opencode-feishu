@@ -15,6 +15,25 @@ export interface PendingReplyPayload {
 
 const pendingBySession = new Map<string, PendingReplyPayload>()
 
+/**
+ * 会话级别的模型不兼容错误追踪
+ * session.error 事件携带真实的 ProviderModelNotFoundError 信息，
+ * 在 prompt HTTP 响应（JSON Parse error）之前到达
+ */
+const sessionErrors = new Map<string, string>()
+
+export function trackSessionError(sessionId: string, error: string): void {
+  if (error.includes("ModelNotFound") || error.includes("ProviderModelNotFound")) {
+    sessionErrors.set(sessionId, error)
+  }
+}
+
+export function consumeSessionError(sessionId: string): string | undefined {
+  const err = sessionErrors.get(sessionId)
+  if (err) sessionErrors.delete(sessionId)
+  return err
+}
+
 export function registerPending(
   sessionId: string,
   payload: Omit<PendingReplyPayload, "textBuffer">,
@@ -68,10 +87,15 @@ export async function handleEvent(
       const sessionId = props.sessionID as string | undefined
       if (!sessionId) break
 
+      const rawErr = (props.error as Record<string, unknown>)?.message
+      const errMsg = typeof rawErr === "string" ? rawErr : String(props.error)
+
+      // 追踪模型不兼容错误，供 promptWithForkRecovery 查询
+      trackSessionError(sessionId, errMsg)
+
       const payload = pendingBySession.get(sessionId)
       if (!payload) break
 
-      const errMsg = (props.error as Record<string, unknown>)?.message ?? String(props.error)
       const updateRes = await sender.updateMessage(payload.feishuClient, payload.placeholderId, `❌ 会话错误: ${errMsg}`)
       if (!updateRes.ok) {
         await sender.sendTextMessage(payload.feishuClient, payload.chatId, `❌ 会话错误: ${errMsg}`)
