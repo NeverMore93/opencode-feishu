@@ -74,13 +74,22 @@ export async function forkSession(
     body: {},
   })
   if (!resp?.data?.id) {
-    throw new Error("Fork 会话失败")
+    const err = (resp as unknown as { error?: unknown })?.error
+    throw new Error(
+      `Fork 会话失败: ${err ? JSON.stringify(err) : "unknown"}`,
+    )
   }
   const title = generateSessionTitle(sessionKey)
-  await client.session.update({
+  const updateResp = await client.session.update({
     path: { id: resp.data.id },
     query,
     body: { title },
   })
+  if (!updateResp?.data?.id) {
+    const err = (updateResp as unknown as { error?: unknown })?.error
+    throw new Error(
+      `更新 forked session 标题失败: ${err ? JSON.stringify(err) : "unknown"}`,
+    )
+  }
   return { id: resp.data.id, title }
 }
