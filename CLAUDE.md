@@ -113,7 +113,8 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
     │       │   └── 主动回复: client.session.prompt() → 轮询 → sender
     │       └── im.chat.member.bot.added_v1 → ingestGroupHistory()
     └── event 钩子 → handleEvent()
-        └── message.part.updated → 实时更新飞书占位消息
+        ├── message.part.updated → 实时更新飞书占位消息
+        └── session.error → 缓存错误 + 模型不兼容时自动恢复会话
 ```
 
 ### 核心模块
@@ -141,8 +142,10 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **事件处理器 (`src/handler/event.ts`):**
 - 处理 `message.part.updated` 实时更新占位消息
-- 处理 `session.error` 向用户发送错误消息
+- 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map、检测模型不兼容触发自动恢复
 - 管理 `pendingBySession` 映射（sessionId → 飞书占位消息）
+- 管理 `forkAttempts` 计数器（防止无限 fork 循环，上限 2 次）
+- 管理 `sessionErrors` 映射（30s TTL，供 chat.ts 消费真实错误）
 
 **历史摄入 (`src/feishu/history.ts`):**
 - 通过飞书 API 获取最近 50 条群消息
@@ -235,8 +238,24 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 提示超时：`timeout` 后返回"⚠️ 响应超时"
 - 消息去重：10 分钟窗口防止重复处理
 - 飞书消息发送失败：尽力更新占位消息，回退到发送新消息
-- 会话错误：通过 `session.error` 事件向飞书发送错误消息
 - 所有错误向飞书用户发送友好消息（不静默失败）
+
+### 会话错误处理（三层架构）
+
+**L1 错误提取**（event.ts）：从 `session.error` SSE 事件提取有意义的错误消息
+- 提取优先级：`e.message` → `data.message` → `e.type` → `e.name` → 兜底文案
+- SDK `UnknownError` 类型的 `data.message` 是 required 字段，存放原始错误名
+
+**L2 模型不兼容自动恢复**（event.ts + session.ts）：检测 `ModelNotFound`/`ProviderModelNotFound` 错误时自动恢复会话
+- `forkOrCreateSession()`：先尝试 fork 旧会话（保留上下文），失败则创建全新 session
+- `forkAttempts` 计数器：每 sessionKey 最多 fork 2 次，防止无限循环
+- `clearForkAttempts()`：prompt 成功后重置计数，避免一次性错误导致永久锁死
+- `migratePending()`：fork 后迁移占位消息到新 session
+
+**L3 竞态协调**（chat.ts）：prompt() HTTP 响应和 SSE session.error 并行到达
+- catch 块等待 100ms（`SSE_RACE_WAIT_MS`）让 SSE 事件先到达
+- 优先使用 `getSessionError()` 缓存的真实错误，而非 prompt() 抛出的 JSON 解析错误
+- 错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）
 
 ## 日志记录
 
@@ -254,7 +273,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 3. 在 `src/index.ts` 中连接处理器
 
 ### 修改轮询行为
-- `src/handler/chat.ts` 中的常量：`POLL_INTERVAL_MS`、`STABLE_POLLS`
+- `feishu.json` 中配置 `pollInterval` 和 `stablePolls`
 - 调整以实现更快/更慢的响应检测
 
 ### 调试事件流

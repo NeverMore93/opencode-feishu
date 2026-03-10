@@ -5,7 +5,7 @@ import type { Event } from "@opencode-ai/sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 
 import * as sender from "../feishu/sender.js"
-import { invalidateCachedSession, setCachedSession, forkSession } from "../session.js"
+import { invalidateCachedSession, setCachedSession, forkOrCreateSession } from "../session.js"
 import type { LogFn } from "../types.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
@@ -26,6 +26,35 @@ const pendingBySession = new Map<string, PendingReplyPayload>()
 const sessionErrors = new Map<string, string>()
 const sessionErrorTimeouts = new Map<string, NodeJS.Timeout>()
 const SESSION_ERROR_TTL_MS = 30_000
+
+/** Fork 次数限制：防止模型不兼容时无限 fork 循环 */
+const forkAttempts = new Map<string, number>()
+const forkAttemptTimeouts = new Map<string, NodeJS.Timeout>()
+const MAX_FORK_ATTEMPTS = 2
+const FORK_ATTEMPTS_TTL_MS = 3_600_000 // 1 小时后自动清除
+
+/**
+ * 重置指定 sessionKey 的 fork 计数（成功 prompt 后调用）
+ */
+export function clearForkAttempts(sessionKey: string): void {
+  forkAttempts.delete(sessionKey)
+  const timer = forkAttemptTimeouts.get(sessionKey)
+  if (timer) {
+    clearTimeout(timer)
+    forkAttemptTimeouts.delete(sessionKey)
+  }
+}
+
+function setForkAttempts(sessionKey: string, count: number): void {
+  forkAttempts.set(sessionKey, count)
+  const existing = forkAttemptTimeouts.get(sessionKey)
+  if (existing) clearTimeout(existing)
+  const timeoutId = setTimeout(() => {
+    forkAttempts.delete(sessionKey)
+    forkAttemptTimeouts.delete(sessionKey)
+  }, FORK_ATTEMPTS_TTL_MS)
+  forkAttemptTimeouts.set(sessionKey, timeoutId)
+}
 
 export function getSessionError(sessionId: string): string | undefined {
   return sessionErrors.get(sessionId)
@@ -168,27 +197,34 @@ export async function handleEvent(
 
       setSessionError(sessionId, errMsg)
 
-      // 模型不兼容错误：主动 fork 会话，更新缓存
+      // 模型不兼容错误：主动 fork 会话，更新缓存（有次数限制）
       if (isModelError(errMsg, props.error)) {
         const sessionKey = invalidateCachedSession(sessionId)
         if (sessionKey) {
-          try {
-            const newSession = await forkSession(deps.client, sessionId, sessionKey, deps.directory)
-            setCachedSession(sessionKey, newSession)
-            deps.log("warn", "模型不兼容，已主动 fork 会话", {
-              oldSessionId: sessionId,
-              newSessionId: newSession.id,
-              sessionKey,
-            })
+          const attempts = forkAttempts.get(sessionKey) ?? 0
+          if (attempts >= MAX_FORK_ATTEMPTS) {
+            deps.log("warn", "已达 fork 上限，放弃恢复", { sessionKey, attempts })
+          } else {
+            setForkAttempts(sessionKey, attempts + 1)
+            try {
+              const newSession = await forkOrCreateSession(deps.client, sessionId, sessionKey, deps.directory, deps.log)
+              setCachedSession(sessionKey, newSession)
+              deps.log("warn", "模型不兼容，已恢复会话", {
+                oldSessionId: sessionId,
+                newSessionId: newSession.id,
+                sessionKey,
+                forkAttempt: attempts + 1,
+              })
 
-            // 迁移 pending（如果有占位消息在旧 session 上）
-            migratePending(sessionId, newSession.id)
-          } catch (forkErr) {
-            deps.log("error", "主动 fork 失败", {
-              sessionId,
-              sessionKey,
-              error: forkErr instanceof Error ? forkErr.message : String(forkErr),
-            })
+              // 迁移 pending（如果有占位消息在旧 session 上）
+              migratePending(sessionId, newSession.id)
+            } catch (recoverErr) {
+              deps.log("error", "会话恢复失败", {
+                sessionId,
+                sessionKey,
+                error: recoverErr instanceof Error ? recoverErr.message : String(recoverErr),
+              })
+            }
           }
         }
       }

@@ -2,6 +2,7 @@
  * 共享会话管理：查找或创建 OpenCode 会话
  */
 import type { OpencodeClient } from "@opencode-ai/sdk"
+import type { LogFn } from "./types.js"
 
 const SESSION_KEY_PREFIX = "feishu"
 const TITLE_PREFIX = "Feishu"
@@ -104,7 +105,7 @@ export async function getOrCreateSession(
 /**
  * Fork 旧会话并更新标题，用于模型不兼容时的自动恢复
  */
-export async function forkSession(
+async function forkSession(
   client: OpencodeClient,
   oldSessionId: string,
   sessionKey: string,
@@ -135,4 +136,46 @@ export async function forkSession(
     )
   }
   return { id: resp.data.id, title }
+}
+
+/**
+ * 创建全新会话（fork 失败时的 fallback）
+ */
+async function createFreshSession(
+  client: OpencodeClient,
+  sessionKey: string,
+  directory?: string,
+): Promise<{ id: string; title?: string }> {
+  const query = directory ? { directory } : undefined
+  const title = generateSessionTitle(sessionKey)
+  const resp = await client.session.create({ query, body: { title } })
+  if (!resp?.data?.id) {
+    const err = (resp as unknown as { error?: unknown })?.error
+    throw new Error(
+      `创建新会话失败: ${err ? JSON.stringify(err) : "unknown"}`,
+    )
+  }
+  return { id: resp.data.id, title: resp.data.title }
+}
+
+/**
+ * 尝试 fork 旧会话，失败时 fallback 到创建全新会话
+ */
+export async function forkOrCreateSession(
+  client: OpencodeClient,
+  oldSessionId: string,
+  sessionKey: string,
+  directory?: string,
+  log?: LogFn,
+): Promise<{ id: string; title?: string }> {
+  try {
+    return await forkSession(client, oldSessionId, sessionKey, directory)
+  } catch (forkErr) {
+    log?.("warn", "Fork 失败，回退到创建新会话", {
+      oldSessionId,
+      sessionKey,
+      error: forkErr instanceof Error ? forkErr.message : String(forkErr),
+    })
+    return await createFreshSession(client, sessionKey, directory)
+  }
 }

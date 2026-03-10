@@ -4,7 +4,7 @@
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import * as sender from "../feishu/sender.js"
-import { registerPending, unregisterPending, getSessionError, clearSessionError } from "./event.js"
+import { registerPending, unregisterPending, getSessionError, clearSessionError, clearForkAttempts } from "./event.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
@@ -108,6 +108,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
     const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query })
 
+    // prompt 成功：重置 fork 计数，避免一次性错误导致永久计数
+    clearForkAttempts(sessionKey)
+
     await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
     // 自动提示循环：响应完成后自动发送"继续"推动 OpenCode 持续工作
@@ -164,7 +167,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       sessionKey: sessionKey.replace(/-[^-]+$/, "-***"),
       chatType,
       error: thrownError,
-      ...(sessionError ? { sessionError } : {}),
+      ...(sessionError
+        ? { sessionError }
+        : { sseRaceMiss: true }),
     })
     const msg = "❌ " + errorMessage
     await replyOrUpdate(feishuClient, chatId, placeholderId, msg)
