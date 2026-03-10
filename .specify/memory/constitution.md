@@ -1,8 +1,8 @@
 <!--
 Sync Impact Report
 ==================
-- Version change: 2.3.0 → 2.3.1 (PATCH)
-- Modified principles: 八（日志规范）— 移除 maskKey 脱敏要求
+- Version change: 2.3.1 → 2.4.0 (MINOR)
+- Modified principles: 九（错误处理）— fork 恢复改为同 session 重试
 - Added sections: None
 - Removed sections: None
 - Templates requiring updates: None

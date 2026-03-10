@@ -196,7 +196,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     if (sessionError && isModelError(sessionError.fields)) {
       const attempts = getRetryAttempts(sessionKey)
       if (attempts < MAX_RETRY_ATTEMPTS) {
-        setRetryAttempts(sessionKey, attempts + 1)
         try {
           // 从所有已连接 provider 中找可用模型
           const modelOverride = await resolveLatestModel(client, sessionError.fields, directory)
@@ -204,6 +203,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
             log("warn", "无任何已连接 provider 有可用模型，放弃恢复", { sessionKey })
             // fall through 到正常错误处理
           } else {
+            setRetryAttempts(sessionKey, attempts + 1)
             log("info", "已解析可用模型，在同一 session 上重试", {
               sessionKey,
               providerID: modelOverride.providerID,
@@ -291,7 +291,7 @@ async function resolveLatestModel(
   directory?: string,
 ): Promise<{ providerID: string; modelID: string } | undefined> {
   // 提取失败模型的 provider/model（用于排除）
-  const pattern = /model not found:?\s*(\w[\w-]*)\/(\S+)/i
+  const pattern = /model\s*not\s*found:?\s*(\w[\w-]*)\/(\S+)/i
   const match = errorFields.map(f => pattern.exec(f)).find(Boolean)
   const failedProviderID = match?.[1]?.toLowerCase()
   const failedModelID = match?.[2]?.replace(/\.$/, "")

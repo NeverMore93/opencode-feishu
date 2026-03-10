@@ -142,9 +142,9 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **事件处理器 (`src/handler/event.ts`):**
 - 处理 `message.part.updated` 实时更新占位消息
-- 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map、检测模型不兼容触发自动恢复
+- 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map
 - 管理 `pendingBySession` 映射（sessionId → 飞书占位消息）
-- 管理 `forkAttempts` 计数器（防止无限 fork 循环，上限 2 次）
+- 管理 `retryAttempts` 计数器（防止无限重试循环，上限 2 次）
 - 管理 `sessionErrors` 映射（30s TTL，供 chat.ts 消费真实错误）
 
 **历史摄入 (`src/feishu/history.ts`):**
