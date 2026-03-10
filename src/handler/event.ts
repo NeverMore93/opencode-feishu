@@ -87,7 +87,7 @@ function isModelError(errMsg: string, rawError?: unknown): boolean {
     const fields = [e.type, e.name, e.message].filter(Boolean).map(String)
     // 也检查 data.message（SDK 错误类型的嵌套结构）
     if (e.data && typeof e.data === "object" && "message" in e.data) {
-      const dataMsg = (e.data as { message?: unknown }).message
+      const dataMsg = e.data.message
       if (dataMsg) fields.push(String(dataMsg))
     }
     return fields.some(f => f.includes("ModelNotFound") || f.includes("ProviderModelNotFound"))
