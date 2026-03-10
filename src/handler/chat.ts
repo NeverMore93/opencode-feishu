@@ -9,6 +9,7 @@ import {
   getSessionError, clearSessionError,
   clearRetryAttempts, getRetryAttempts, setRetryAttempts, MAX_RETRY_ATTEMPTS,
   isModelError, extractErrorFields,
+  type CachedSessionError,
 } from "./event.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
@@ -156,6 +157,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   }
 
   try {
+    // 清除前次遗留的 session error 缓存，避免 pollForResponse 误检测旧错误
+    clearSessionError(session.id)
+
     await client.session.prompt({
       path: { id: session.id },
       query,
@@ -177,18 +181,24 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
     await runAutoPromptLoop(session.id)
   } catch (err) {
-    // 等待一个微小窗口，让可能在途的 session.error 事件有机会到达并被处理
-    await new Promise(r => setTimeout(r, SSE_RACE_WAIT_MS))
+    // pollForResponse 检测到 SSE 错误时直接携带 sessionError，无需竞态等待
+    let sessionError: CachedSessionError | undefined
+    if (err instanceof SessionErrorDetected) {
+      sessionError = err.sessionError
+      clearSessionError(session.id)
+    } else {
+      // 非 SSE 检测的错误：等待微小窗口让 session.error 事件到达
+      await new Promise(r => setTimeout(r, SSE_RACE_WAIT_MS))
+      sessionError = getSessionError(session.id)
+      clearSessionError(session.id)
 
-    let sessionError = getSessionError(session.id)
-    clearSessionError(session.id)
-
-    // SSE 缓存未命中时，尝试从 prompt() 抛出的错误中提取模型错误信息
-    if (!sessionError) {
-      const thrownFields = extractErrorFields(err)
-      if (isModelError(thrownFields)) {
-        const thrownMsg = err instanceof Error ? err.message : String(err)
-        sessionError = { message: thrownMsg, fields: thrownFields }
+      // SSE 缓存未命中时，尝试从 prompt() 抛出的错误中提取模型错误信息
+      if (!sessionError) {
+        const thrownFields = extractErrorFields(err)
+        if (isModelError(thrownFields)) {
+          const thrownMsg = err instanceof Error ? err.message : String(err)
+          sessionError = { message: thrownMsg, fields: thrownFields }
+        }
       }
     }
 
@@ -197,20 +207,29 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       const attempts = getRetryAttempts(sessionKey)
       if (attempts < MAX_RETRY_ATTEMPTS) {
         try {
-          // 从所有已连接 provider 中找可用模型
-          const modelOverride = await resolveLatestModel(client, sessionError.fields, directory)
+          // 使用全局配置的默认模型恢复（FR-005）
+          let modelOverride: { providerID: string; modelID: string } | undefined
+          try {
+            modelOverride = await getGlobalDefaultModel(client, directory)
+          } catch (configErr) {
+            log("warn", "读取全局模型配置失败", {
+              sessionKey,
+              error: configErr instanceof Error ? configErr.message : String(configErr),
+            })
+          }
           if (!modelOverride) {
-            log("warn", "无任何已连接 provider 有可用模型，放弃恢复", { sessionKey })
+            log("warn", "全局默认模型未配置，放弃恢复", { sessionKey })
             // fall through 到正常错误处理
           } else {
             setRetryAttempts(sessionKey, attempts + 1)
-            log("info", "已解析可用模型，在同一 session 上重试", {
+            log("info", "使用全局默认模型恢复", {
               sessionKey,
               providerID: modelOverride.providerID,
               modelID: modelOverride.modelID,
             })
 
-            // 在同一 session 上用可用模型重试 prompt（不 fork，保留完整对话历史）
+            // 清除旧错误，在同一 session 上用可用模型重试 prompt（不 fork，保留完整对话历史）
+            clearSessionError(session.id)
             await client.session.prompt({
               path: { id: session.id },
               query,
@@ -239,15 +258,21 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
             return
           }
         } catch (recoveryErr) {
-          const recoveryErrMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
-          // 检查恢复重试是否也产生了 SSE 错误
-          const retryError = getSessionError(session.id)
-          if (retryError) clearSessionError(session.id)
-          sessionError = retryError ?? { message: recoveryErrMsg, fields: [] }
+          // 恢复重试的 pollForResponse 也可能检测到 SSE 错误
+          if (recoveryErr instanceof SessionErrorDetected) {
+            sessionError = recoveryErr.sessionError
+            clearSessionError(session.id)
+          } else {
+            const retryError = getSessionError(session.id)
+            if (retryError) clearSessionError(session.id)
+            const recoveryErrMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
+            sessionError = retryError ?? { message: recoveryErrMsg, fields: [] }
+          }
+          const errMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
           log("error", "模型恢复失败", {
             sessionId: session.id,
             sessionKey,
-            error: recoveryErrMsg,
+            error: errMsg,
           })
           // fall through 到正常错误处理
         }
@@ -282,51 +307,19 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 }
 
 /**
- * 从所有已连接 provider 中选择可用模型，排除失败模型。
- * 不限于失败模型所在的 provider — 会搜索所有已连接 provider。
+ * 从全局配置读取默认模型（Config.model 字段），解析为 { providerID, modelID }。
+ * 不在失败 provider 内搜索替代 — 只用用户明确配置的默认模型。
  */
-async function resolveLatestModel(
+async function getGlobalDefaultModel(
   client: OpencodeClient,
-  errorFields: string[],
   directory?: string,
 ): Promise<{ providerID: string; modelID: string } | undefined> {
-  // 提取失败模型的 provider/model（用于排除）
-  const pattern = /model\s*not\s*found:?\s*(\w[\w-]*)\/(\S+)/i
-  const match = errorFields.map(f => pattern.exec(f)).find(Boolean)
-  const failedProviderID = match?.[1]?.toLowerCase()
-  const failedModelID = match?.[2]?.replace(/\.$/, "")
-
   const query = directory ? { directory } : undefined
-  const { data } = await client.provider.list({ query })
-  if (!data) return undefined
-
-  const connectedProviders = data.connected ?? []
-  if (connectedProviders.length === 0) return undefined
-
-  // 优先使用已连接 provider 的默认模型（排除失败模型）
-  for (const pid of connectedProviders) {
-    const defaultModelID = data.default?.[pid]
-    if (defaultModelID && !(pid === failedProviderID && defaultModelID === failedModelID)) {
-      return { providerID: pid, modelID: defaultModelID }
-    }
-  }
-
-  // Fallback：遍历所有已连接 provider 的模型列表，选最佳可用模型
-  for (const pid of connectedProviders) {
-    const provider = data.all?.find(p => p.id === pid)
-    if (!provider?.models) continue
-
-    const candidates = Object.values(provider.models)
-      .filter(m => m.status !== "deprecated" && !(pid === failedProviderID && m.id === failedModelID))
-      .sort((a, b) => b.release_date.localeCompare(a.release_date))
-
-    if (candidates.length > 0) {
-      const best = candidates.find(m => m.tool_call) ?? candidates[0]
-      return { providerID: pid, modelID: best.id }
-    }
-  }
-
-  return undefined
+  const { data: config } = await client.config.get({ query })
+  const model = config?.model
+  if (!model || !model.includes("/")) return undefined
+  const slash = model.indexOf("/")
+  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
 }
 
 /**
@@ -363,8 +356,17 @@ async function buildPromptParts(
   return parts
 }
 
+/** pollForResponse 检测到 SSE 错误时抛出的异常 */
+class SessionErrorDetected extends Error {
+  constructor(public readonly sessionError: CachedSessionError) {
+    super(sessionError.message)
+    this.name = "SessionErrorDetected"
+  }
+}
+
 /**
- * 轮询等待 AI 响应稳定，返回最终文本
+ * 轮询等待 AI 响应稳定，返回最终文本。
+ * 每次 poll 周期检查 SSE 缓存的 session error，检测到时立即终止并抛出异常。
  */
 async function pollForResponse(
   client: OpencodeClient,
@@ -388,6 +390,13 @@ async function pollForResponse(
     } else {
       await new Promise((r) => setTimeout(r, pollInterval))
     }
+
+    // 检查 SSE 缓存的 session error（FR-001）
+    const sseError = getSessionError(sessionId)
+    if (sseError) {
+      throw new SessionErrorDetected(sseError)
+    }
+
     const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
     const text = extractLastAssistantText(messages ?? [])
 

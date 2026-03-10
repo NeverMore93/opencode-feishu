@@ -125,6 +125,7 @@ export function isModelError(fields: string[]): boolean {
   const check = (s: string) => {
     const l = s.toLowerCase()
     return l.includes("model not found") || l.includes("modelnotfound")
+      || l.includes("model not supported") || l.includes("model_not_supported")
   }
   return fields.some(check)
 }
