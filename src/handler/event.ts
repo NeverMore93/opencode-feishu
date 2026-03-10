@@ -5,7 +5,6 @@ import type { Event } from "@opencode-ai/sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 
 import * as sender from "../feishu/sender.js"
-import { invalidateCachedSession, setCachedSession, forkOrCreateSession } from "../session.js"
 import type { LogFn } from "../types.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
@@ -22,28 +21,23 @@ export interface EventDeps {
   directory: string
 }
 
-/** 脱敏 sessionKey（隐藏末段用户/群 ID） */
-function maskKey(sessionKey: string): string {
-  return sessionKey.replace(/-[^-]+$/, "-***")
+const pendingBySession = new Map<string, PendingReplyPayload>()
+
+/** 缓存的会话错误信息 */
+export interface CachedSessionError {
+  message: string    // 用于展示的错误消息
+  fields: string[]   // 所有提取的错误文本字段（用于模式匹配）
 }
 
-const pendingBySession = new Map<string, PendingReplyPayload>()
-const sessionErrors = new Map<string, string>()
+const sessionErrors = new Map<string, CachedSessionError>()
 const sessionErrorTimeouts = new Map<string, NodeJS.Timeout>()
 const SESSION_ERROR_TTL_MS = 30_000
-
-/** 模型降级覆盖：fork 恢复后存储可用模型，供 chat.ts prompt 时使用 */
-const modelOverrides = new Map<string, { providerID: string; modelID: string }>()
-
-/** 正在进行的 fork 恢复 Promise，供 chat.ts await */
-const pendingRecoveries = new Map<string, Promise<{ sessionId: string; modelOverride?: { providerID: string; modelID: string } } | undefined>>()
-const RECOVERY_TTL_MS = 30_000
 
 /** Fork 次数限制：防止模型不兼容时无限 fork 循环 */
 const forkAttempts = new Map<string, number>()
 const forkAttemptTimeouts = new Map<string, NodeJS.Timeout>()
-const MAX_FORK_ATTEMPTS = 2
-const FORK_ATTEMPTS_TTL_MS = 3_600_000 // 1 小时后自动清除
+export const MAX_FORK_ATTEMPTS = 2
+const FORK_ATTEMPTS_TTL_MS = 3_600_000
 
 /**
  * 重置指定 sessionKey 的 fork 计数（成功 prompt 后调用）
@@ -57,7 +51,11 @@ export function clearForkAttempts(sessionKey: string): void {
   }
 }
 
-function setForkAttempts(sessionKey: string, count: number): void {
+export function getForkAttempts(sessionKey: string): number {
+  return forkAttempts.get(sessionKey) ?? 0
+}
+
+export function setForkAttempts(sessionKey: string, count: number): void {
   forkAttempts.set(sessionKey, count)
   const existing = forkAttemptTimeouts.get(sessionKey)
   if (existing) clearTimeout(existing)
@@ -68,22 +66,7 @@ function setForkAttempts(sessionKey: string, count: number): void {
   forkAttemptTimeouts.set(sessionKey, timeoutId)
 }
 
-/**
- * 获取正在进行的 fork 恢复 Promise（供 chat.ts catch 块 await）
- */
-export function getPendingRecovery(sessionId: string): Promise<{ sessionId: string; modelOverride?: { providerID: string; modelID: string } } | undefined> | undefined {
-  return pendingRecoveries.get(sessionId)
-}
-
-export function getModelOverride(sessionKey: string): { providerID: string; modelID: string } | undefined {
-  return modelOverrides.get(sessionKey)
-}
-
-export function clearModelOverride(sessionKey: string): void {
-  modelOverrides.delete(sessionKey)
-}
-
-export function getSessionError(sessionId: string): string | undefined {
+export function getSessionError(sessionId: string): CachedSessionError | undefined {
   return sessionErrors.get(sessionId)
 }
 
@@ -96,12 +79,12 @@ export function clearSessionError(sessionId: string): void {
   sessionErrors.delete(sessionId)
 }
 
-function setSessionError(sessionId: string, errMsg: string): void {
+function setSessionError(sessionId: string, message: string, fields: string[]): void {
   const existing = sessionErrorTimeouts.get(sessionId)
   if (existing) {
     clearTimeout(existing)
   }
-  sessionErrors.set(sessionId, errMsg)
+  sessionErrors.set(sessionId, { message, fields })
   const timeoutId = setTimeout(() => {
     sessionErrors.delete(sessionId)
     sessionErrorTimeouts.delete(sessionId)
@@ -121,20 +104,9 @@ export function unregisterPending(sessionId: string): void {
 }
 
 /**
- * 迁移 pending 占位消息到新 session（fork 后旧 sessionId → 新 sessionId）
- */
-function migratePending(oldSessionId: string, newSessionId: string): void {
-  const payload = pendingBySession.get(oldSessionId)
-  if (payload) {
-    pendingBySession.delete(oldSessionId)
-    pendingBySession.set(newSessionId, payload)
-  }
-}
-
-/**
  * 从 error 对象提取所有文本字段（message/type/name/data.message）
  */
-function extractErrorFields(error: unknown): string[] {
+export function extractErrorFields(error: unknown): string[] {
   if (typeof error === "string") return [error]
   if (error && typeof error === "object") {
     const e = error as Record<string, unknown>
@@ -149,16 +121,14 @@ function extractErrorFields(error: unknown): string[] {
 }
 
 /**
- * 检测错误消息是否为模型不兼容错误
+ * 检测错误字段是否包含模型不兼容错误
  */
-function isModelError(errMsg: string, rawError?: unknown): boolean {
+export function isModelError(fields: string[]): boolean {
   const check = (s: string) => {
     const l = s.toLowerCase()
     return l.includes("model not found") || l.includes("modelnotfound")
   }
-  if (check(errMsg)) return true
-  if (rawError) return extractErrorFields(rawError).some(check)
-  return false
+  return fields.some(check)
 }
 
 /**
@@ -219,122 +189,18 @@ export async function handleEvent(
         errMsg = String(error)
       }
 
+      const fields = extractErrorFields(error)
+
       deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
 
-      setSessionError(sessionId, errMsg)
+      setSessionError(sessionId, errMsg, fields)
 
-      // 模型不兼容错误：主动 fork 会话，更新缓存（有次数限制）
-      if (isModelError(errMsg, props.error)) {
-        const sessionKey = invalidateCachedSession(sessionId)
-        if (sessionKey) {
-          const attempts = forkAttempts.get(sessionKey) ?? 0
-          if (attempts >= MAX_FORK_ATTEMPTS) {
-            deps.log("warn", "已达 fork 上限，放弃恢复", { sessionKey: maskKey(sessionKey), attempts })
-          } else {
-            setForkAttempts(sessionKey, attempts + 1)
-            const recoveryPromise = (async (): Promise<{ sessionId: string; modelOverride?: { providerID: string; modelID: string } } | undefined> => {
-              try {
-                const newSession = await forkOrCreateSession(deps.client, sessionId, sessionKey, deps.directory, deps.log)
-                setCachedSession(sessionKey, newSession)
-                // 清除旧 override 后解析最新可用模型
-                modelOverrides.delete(sessionKey)
-                let fallbackModel: { providerID: string; modelID: string } | undefined
-                try {
-                  fallbackModel = await resolveLatestModel(deps.client, props.error ?? errMsg, deps.directory)
-                  if (fallbackModel) {
-                    modelOverrides.set(sessionKey, fallbackModel)
-                    deps.log("info", "已解析降级模型", {
-                      sessionKey: maskKey(sessionKey),
-                      providerID: fallbackModel.providerID,
-                      modelID: fallbackModel.modelID,
-                    })
-                  }
-                } catch (modelErr) {
-                  deps.log("warn", "解析降级模型失败，将使用默认模型", {
-                    sessionKey: maskKey(sessionKey),
-                    error: modelErr instanceof Error ? modelErr.message : String(modelErr),
-                  })
-                }
-
-                deps.log("warn", "模型不兼容，已恢复会话", {
-                  oldSessionId: sessionId,
-                  newSessionId: newSession.id,
-                  sessionKey: maskKey(sessionKey),
-                  forkAttempt: attempts + 1,
-                })
-
-                // 迁移 pending（如果有占位消息在旧 session 上）
-                migratePending(sessionId, newSession.id)
-
-                return { sessionId: newSession.id, modelOverride: fallbackModel }
-              } catch (recoverErr) {
-                deps.log("error", "会话恢复失败", {
-                  sessionId,
-                  sessionKey: maskKey(sessionKey),
-                  error: recoverErr instanceof Error ? recoverErr.message : String(recoverErr),
-                })
-                return undefined
-              } finally {
-                pendingRecoveries.delete(sessionId)
-              }
-            })()
-
-            pendingRecoveries.set(sessionId, recoveryPromise)
-            // TTL 防护：即使 Promise 永不 resolve 也会被清理
-            setTimeout(() => pendingRecoveries.delete(sessionId), RECOVERY_TTL_MS)
-
-            // 仍然 await 以确保日志顺序
-            await recoveryPromise
-          }
-        }
-      }
-
-      // 不在此处向用户发送错误消息——由 chat.ts catch 块统一处理
-      // 避免 event.ts 和 chat.ts 双重发送错误消息
+      // 不在此处做 fork 恢复或向用户发送错误——统一由 chat.ts catch 块处理
       break
     }
     default:
       break
   }
-}
-
-/**
- * 从错误对象的所有字段中提取 providerID，查询可用模型列表，返回最新可用模型
- * rawError 可能是 string 或 SDK error object，需要检查 message/data.message/type/name
- */
-async function resolveLatestModel(
-  client: OpencodeClient,
-  rawError: unknown,
-  directory?: string,
-): Promise<{ providerID: string; modelID: string } | undefined> {
-  const pattern = /model not found:?\s*(\w[\w-]*)\//i
-  const fields = extractErrorFields(rawError)
-  const rawProviderID = fields.map(f => pattern.exec(f)?.[1]).find(Boolean)
-  if (!rawProviderID) return undefined
-  // provider API 的 id 是小写的，错误消息可能是 "OpenAI/..." 等混合大小写
-  const providerID = rawProviderID.toLowerCase()
-
-  const query = directory ? { directory } : undefined
-  const { data } = await client.provider.list({ query })
-  if (!data) return undefined
-
-  // 优先使用该 provider 的默认模型
-  const defaultModelID = data.default?.[providerID]
-  if (defaultModelID) {
-    return { providerID, modelID: defaultModelID }
-  }
-
-  // Fallback：从 provider 的模型列表中选最新模型（优先 tool_call，其次任意非 deprecated）
-  const provider = data.all?.find(p => p.id === providerID)
-  if (!provider?.models) return undefined
-
-  const sortedModels = Object.values(provider.models)
-    .filter(m => m.status !== "deprecated")
-    .sort((a, b) => b.release_date.localeCompare(a.release_date))
-
-  if (sortedModels.length === 0) return undefined
-  const best = sortedModels.find(m => m.tool_call) ?? sortedModels[0]
-  return { providerID, modelID: best.id }
 }
 
 function extractPartText(part: { type?: string; text?: string; [key: string]: unknown }): string {
