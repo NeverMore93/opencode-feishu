@@ -7,7 +7,7 @@ import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
   getSessionError, clearSessionError,
-  clearForkAttempts, getForkAttempts, setForkAttempts, MAX_FORK_ATTEMPTS,
+  clearRetryAttempts, getRetryAttempts, setRetryAttempts, MAX_RETRY_ATTEMPTS,
   isModelError, extractErrorFields,
 } from "./event.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
@@ -171,7 +171,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     })
 
     // prompt 成功：重置 fork 计数
-    clearForkAttempts(sessionKey)
+    clearRetryAttempts(sessionKey)
 
     await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
@@ -194,9 +194,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
     // 模型不兼容错误：在同一 session 上用可用模型重试（session 未损坏，model 是 per-request）
     if (sessionError && isModelError(sessionError.fields)) {
-      const attempts = getForkAttempts(sessionKey)
-      if (attempts < MAX_FORK_ATTEMPTS) {
-        setForkAttempts(sessionKey, attempts + 1)
+      const attempts = getRetryAttempts(sessionKey)
+      if (attempts < MAX_RETRY_ATTEMPTS) {
+        setRetryAttempts(sessionKey, attempts + 1)
         try {
           // 从所有已连接 provider 中找可用模型
           const modelOverride = await resolveLatestModel(client, sessionError.fields, directory)
@@ -225,7 +225,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
               output: finalText || "(empty)",
             })
 
-            clearForkAttempts(sessionKey)
+            clearRetryAttempts(sessionKey)
             await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
             log("info", "模型不兼容恢复成功", {

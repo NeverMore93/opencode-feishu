@@ -2,7 +2,6 @@
  * OpenCode 事件处理：通过插件 event 钩子接收事件，更新飞书占位消息
  */
 import type { Event } from "@opencode-ai/sdk"
-import type { OpencodeClient } from "@opencode-ai/sdk"
 
 import * as sender from "../feishu/sender.js"
 import type { LogFn } from "../types.js"
@@ -16,7 +15,6 @@ export interface PendingReplyPayload {
 }
 
 export interface EventDeps {
-  client: OpencodeClient
   log: LogFn
   directory: string
 }
@@ -33,37 +31,37 @@ const sessionErrors = new Map<string, CachedSessionError>()
 const sessionErrorTimeouts = new Map<string, NodeJS.Timeout>()
 const SESSION_ERROR_TTL_MS = 30_000
 
-/** Fork 次数限制：防止模型不兼容时无限 fork 循环 */
-const forkAttempts = new Map<string, number>()
-const forkAttemptTimeouts = new Map<string, NodeJS.Timeout>()
-export const MAX_FORK_ATTEMPTS = 2
-const FORK_ATTEMPTS_TTL_MS = 3_600_000
+/** 重试次数限制：防止模型不兼容时无限重试循环 */
+const retryAttempts = new Map<string, number>()
+const retryAttemptTimeouts = new Map<string, NodeJS.Timeout>()
+export const MAX_RETRY_ATTEMPTS = 2
+const RETRY_ATTEMPTS_TTL_MS = 3_600_000
 
 /**
- * 重置指定 sessionKey 的 fork 计数（成功 prompt 后调用）
+ * 重置指定 sessionKey 的重试计数（成功 prompt 后调用）
  */
-export function clearForkAttempts(sessionKey: string): void {
-  forkAttempts.delete(sessionKey)
-  const timer = forkAttemptTimeouts.get(sessionKey)
+export function clearRetryAttempts(sessionKey: string): void {
+  retryAttempts.delete(sessionKey)
+  const timer = retryAttemptTimeouts.get(sessionKey)
   if (timer) {
     clearTimeout(timer)
-    forkAttemptTimeouts.delete(sessionKey)
+    retryAttemptTimeouts.delete(sessionKey)
   }
 }
 
-export function getForkAttempts(sessionKey: string): number {
-  return forkAttempts.get(sessionKey) ?? 0
+export function getRetryAttempts(sessionKey: string): number {
+  return retryAttempts.get(sessionKey) ?? 0
 }
 
-export function setForkAttempts(sessionKey: string, count: number): void {
-  forkAttempts.set(sessionKey, count)
-  const existing = forkAttemptTimeouts.get(sessionKey)
+export function setRetryAttempts(sessionKey: string, count: number): void {
+  retryAttempts.set(sessionKey, count)
+  const existing = retryAttemptTimeouts.get(sessionKey)
   if (existing) clearTimeout(existing)
   const timeoutId = setTimeout(() => {
-    forkAttempts.delete(sessionKey)
-    forkAttemptTimeouts.delete(sessionKey)
-  }, FORK_ATTEMPTS_TTL_MS)
-  forkAttemptTimeouts.set(sessionKey, timeoutId)
+    retryAttempts.delete(sessionKey)
+    retryAttemptTimeouts.delete(sessionKey)
+  }, RETRY_ATTEMPTS_TTL_MS)
+  retryAttemptTimeouts.set(sessionKey, timeoutId)
 }
 
 export function getSessionError(sessionId: string): CachedSessionError | undefined {

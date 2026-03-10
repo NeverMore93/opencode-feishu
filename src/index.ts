@@ -145,7 +145,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const hooks: Hooks = {
     event: async ({ event }) => {
       if (!gateway) return
-      await handleEvent(event, { client, log, directory: resolvedConfig.directory })
+      await handleEvent(event, { log, directory: resolvedConfig.directory })
     },
   }
   return hooks
