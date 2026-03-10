@@ -10,7 +10,7 @@ import {
   clearForkAttempts, getForkAttempts, setForkAttempts, MAX_FORK_ATTEMPTS,
   isModelError, extractErrorFields,
 } from "./event.js"
-import { buildSessionKey, getOrCreateSession, invalidateCachedSession, setCachedSession, forkOrCreateSession } from "../session.js"
+import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 
@@ -192,76 +192,58 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       }
     }
 
-    // 模型不兼容错误：在 catch 块内完成整个恢复流程（fork → 解析模型 → 重试）
+    // 模型不兼容错误：在同一 session 上用可用模型重试（session 未损坏，model 是 per-request）
     if (sessionError && isModelError(sessionError.fields)) {
       const attempts = getForkAttempts(sessionKey)
       if (attempts < MAX_FORK_ATTEMPTS) {
         setForkAttempts(sessionKey, attempts + 1)
         try {
-          invalidateCachedSession(session.id)
-          const newSession = await forkOrCreateSession(client, session.id, sessionKey, directory, log)
-          setCachedSession(sessionKey, newSession)
-          activeSessionId = newSession.id
-
-          // 解析降级模型
-          let modelOverride: { providerID: string; modelID: string } | undefined
-          try {
-            modelOverride = await resolveLatestModel(client, sessionError.fields, directory)
-            if (modelOverride) {
-              log("info", "已解析降级模型", {
-                sessionKey,
-                providerID: modelOverride.providerID,
-                modelID: modelOverride.modelID,
-              })
-            }
-          } catch (modelErr) {
-            log("warn", "解析降级模型失败，将使用默认模型", {
+          // 从所有已连接 provider 中找可用模型
+          const modelOverride = await resolveLatestModel(client, sessionError.fields, directory)
+          if (!modelOverride) {
+            log("warn", "无任何已连接 provider 有可用模型，放弃恢复", { sessionKey })
+            // fall through 到正常错误处理
+          } else {
+            log("info", "已解析可用模型，在同一 session 上重试", {
               sessionKey,
-              error: modelErr instanceof Error ? modelErr.message : String(modelErr),
+              providerID: modelOverride.providerID,
+              modelID: modelOverride.modelID,
             })
+
+            // 在同一 session 上用可用模型重试 prompt（不 fork，保留完整对话历史）
+            await client.session.prompt({
+              path: { id: session.id },
+              query,
+              body: { ...baseBody, model: modelOverride },
+            })
+
+            const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query })
+
+            log("info", "模型恢复后响应完成", {
+              sessionKey,
+              sessionId: session.id,
+              output: finalText || "(empty)",
+            })
+
+            clearForkAttempts(sessionKey)
+            await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
+
+            log("info", "模型不兼容恢复成功", {
+              sessionId: session.id,
+              sessionKey,
+              model: `${modelOverride.providerID}/${modelOverride.modelID}`,
+              attempt: attempts + 1,
+            })
+
+            await runAutoPromptLoop(session.id)
+            return
           }
-
-          // 迁移占位消息到新 session
-          unregisterPending(session.id)
-          if (placeholderId) {
-            registerPending(newSession.id, { chatId, placeholderId, feishuClient })
-          }
-
-          // 用新 session + 降级模型重试 prompt
-          const retryBody = { ...baseBody, ...(modelOverride ? { model: modelOverride } : {}) }
-          await client.session.prompt({
-            path: { id: newSession.id },
-            query,
-            body: retryBody,
-          })
-
-          const finalText = await pollForResponse(client, newSession.id, { timeout, pollInterval, stablePolls, query })
-
-          log("info", "恢复后模型响应完成", {
-            sessionKey,
-            newSessionId: newSession.id,
-            output: finalText || "(empty)",
-          })
-
-          clearForkAttempts(sessionKey)
-          await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
-
-          log("info", "模型不兼容恢复成功", {
-            oldSessionId: session.id,
-            newSessionId: newSession.id,
-            sessionKey,
-            forkAttempt: attempts + 1,
-          })
-
-          await runAutoPromptLoop(newSession.id)
-          return
         } catch (recoveryErr) {
           const recoveryErrMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
-          // 检查恢复过程中新 session 是否也产生了 SSE 错误
-          const newSessionError = activeSessionId !== session.id ? getSessionError(activeSessionId) : undefined
-          if (newSessionError) clearSessionError(activeSessionId)
-          // 用恢复阶段的实际错误覆盖原始的 model-not-found 错误
-          sessionError = newSessionError ?? { message: recoveryErrMsg, fields: [] }
+          // 检查恢复重试是否也产生了 SSE 错误
+          const retryError = getSessionError(session.id)
+          if (retryError) clearSessionError(session.id)
+          sessionError = retryError ?? { message: recoveryErrMsg, fields: [] }
           log("error", "模型恢复失败", {
             sessionId: session.id,
             sessionKey,
@@ -270,7 +252,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
           // fall through 到正常错误处理
         }
       } else {
-        log("warn", "已达 fork 上限，放弃恢复", {
+        log("warn", "已达重试上限，放弃恢复", {
           sessionKey,
           attempts,
         })
@@ -300,40 +282,51 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 }
 
 /**
- * 从错误字段中提取 providerID，查询可用模型列表，返回最新可用模型
+ * 从所有已连接 provider 中选择可用模型，排除失败模型。
+ * 不限于失败模型所在的 provider — 会搜索所有已连接 provider。
  */
 async function resolveLatestModel(
   client: OpencodeClient,
   errorFields: string[],
   directory?: string,
 ): Promise<{ providerID: string; modelID: string } | undefined> {
-  const pattern = /model not found:?\s*(\w[\w-]*)\//i
-  const rawProviderID = errorFields.map(f => pattern.exec(f)?.[1]).find(Boolean)
-  if (!rawProviderID) return undefined
-  // provider API 的 id 是小写的，错误消息可能是 "OpenAI/..." 等混合大小写
-  const providerID = rawProviderID.toLowerCase()
+  // 提取失败模型的 provider/model（用于排除）
+  const pattern = /model not found:?\s*(\w[\w-]*)\/(\S+)/i
+  const match = errorFields.map(f => pattern.exec(f)).find(Boolean)
+  const failedProviderID = match?.[1]?.toLowerCase()
+  const failedModelID = match?.[2]?.replace(/\.$/, "")
 
   const query = directory ? { directory } : undefined
   const { data } = await client.provider.list({ query })
   if (!data) return undefined
 
-  // 优先使用该 provider 的默认模型
-  const defaultModelID = data.default?.[providerID]
-  if (defaultModelID) {
-    return { providerID, modelID: defaultModelID }
+  const connectedProviders = data.connected ?? []
+  if (connectedProviders.length === 0) return undefined
+
+  // 优先使用已连接 provider 的默认模型（排除失败模型）
+  for (const pid of connectedProviders) {
+    const defaultModelID = data.default?.[pid]
+    if (defaultModelID && !(pid === failedProviderID && defaultModelID === failedModelID)) {
+      return { providerID: pid, modelID: defaultModelID }
+    }
   }
 
-  // Fallback：从 provider 的模型列表中选最新模型（优先 tool_call，其次任意非 deprecated）
-  const provider = data.all?.find(p => p.id === providerID)
-  if (!provider?.models) return undefined
+  // Fallback：遍历所有已连接 provider 的模型列表，选最佳可用模型
+  for (const pid of connectedProviders) {
+    const provider = data.all?.find(p => p.id === pid)
+    if (!provider?.models) continue
 
-  const sortedModels = Object.values(provider.models)
-    .filter(m => m.status !== "deprecated")
-    .sort((a, b) => b.release_date.localeCompare(a.release_date))
+    const candidates = Object.values(provider.models)
+      .filter(m => m.status !== "deprecated" && !(pid === failedProviderID && m.id === failedModelID))
+      .sort((a, b) => b.release_date.localeCompare(a.release_date))
 
-  if (sortedModels.length === 0) return undefined
-  const best = sortedModels.find(m => m.tool_call) ?? sortedModels[0]
-  return { providerID, modelID: best.id }
+    if (candidates.length > 0) {
+      const best = candidates.find(m => m.tool_call) ?? candidates[0]
+      return { providerID: pid, modelID: best.id }
+    }
+  }
+
+  return undefined
 }
 
 /**

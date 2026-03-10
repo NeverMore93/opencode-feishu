@@ -141,7 +141,7 @@ async function forkSession(
 /**
  * 创建全新会话（fork 失败时的 fallback）
  */
-async function createFreshSession(
+export async function createFreshSession(
   client: OpencodeClient,
   sessionKey: string,
   directory?: string,

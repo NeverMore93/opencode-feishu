@@ -246,11 +246,11 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 提取优先级：`e.message` → `data.message` → `e.type` → `e.name` → 兜底文案
 - SDK `UnknownError` 类型的 `data.message` 是 required 字段，存放原始错误名
 
-**L2 模型不兼容自动恢复**（event.ts + session.ts）：检测 `ModelNotFound`/`ProviderModelNotFound` 错误时自动恢复会话
-- `forkOrCreateSession()`：先尝试 fork 旧会话（保留上下文），失败则创建全新 session
-- `forkAttempts` 计数器：每 sessionKey 最多 fork 2 次，防止无限循环
-- `clearForkAttempts()`：prompt 成功后重置计数，避免一次性错误导致永久锁死
-- `migratePending()`：fork 后迁移占位消息到新 session
+**L2 模型不兼容自动恢复**（chat.ts）：检测 `ModelNotFound`/`ProviderModelNotFound` 错误时在同一 session 上重试
+- `resolveLatestModel()`：从错误消息提取失败的 `providerID/modelID`，遍历所有已连接 provider（`data.connected`），排除失败模型，返回可用模型或 undefined
+- 恢复策略：在同一 session 上用 per-request model override 重试 prompt（session 未损坏，model 是 per-request），不 fork、不创建新 session
+- 重试计数器：每 sessionKey 最多重试 2 次，防止无限循环；成功后重置计数
+- 当无任何已连接 provider 有可用模型时，直接向用户显示错误，不重试
 
 **L3 竞态协调**（chat.ts）：prompt() HTTP 响应和 SSE session.error 并行到达
 - catch 块等待 100ms（`SSE_RACE_WAIT_MS`）让 SSE 事件先到达

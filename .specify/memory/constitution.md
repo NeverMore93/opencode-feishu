@@ -76,8 +76,10 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 超时保护：默认 120 秒请求超时
 - 最佳努力：占位消息更新失败时 fallback 到发送新消息
 - 日志静默：`client.app.log()` 失败通过 `.catch(() => {})` 静默处理
-- 会话错误三层架构：L1 错误提取（SSE 事件）→ L2 模型不兼容自动恢复（fork + fallback）→ L3 竞态协调（100ms 窗口）
-- Fork 安全防护：每 sessionKey 最多 fork 2 次，成功后重置；fork 失败 fallback 到新建 session
+- 会话错误三层架构：L1 错误提取（SSE 事件）→ L2 模型不兼容自动恢复（同 session 重试）→ L3 竞态协调（100ms 窗口）
+- Provider 可用性验证：模型降级时 MUST 使用 `provider.list()` 的 `connected` 列表验证 provider 实际可用，不得从 `all`（含未连接 provider）选择模型
+- 重试安全防护：每 sessionKey 最多重试 2 次，成功后重置；无可用模型时直接显示错误
+- 恢复策略：在同一 session 上用 per-request model override 重试（session 未损坏，不 fork、不创建新 session）
 - 错误消息统一出口：chat.ts catch 块负责向用户发送，event.ts 只缓存不发送
 
 ### 十、Infrastructure as Code
@@ -109,4 +111,4 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 
 所有代码变更和文档修改必须符合本约定。
 
-**版本**: 2.3.1 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-10
+**版本**: 2.4.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-10
