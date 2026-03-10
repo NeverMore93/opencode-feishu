@@ -121,8 +121,24 @@ function migratePending(oldSessionId: string, newSessionId: string): void {
 }
 
 /**
+ * 从 error 对象提取所有文本字段（message/type/name/data.message）
+ */
+function extractErrorFields(error: unknown): string[] {
+  if (typeof error === "string") return [error]
+  if (error && typeof error === "object") {
+    const e = error as Record<string, unknown>
+    const fields = [e.type, e.name, e.message].filter(Boolean).map(String)
+    if (e.data && typeof e.data === "object" && "message" in e.data) {
+      const dataMsg = (e.data as { message?: unknown }).message
+      if (dataMsg) fields.push(String(dataMsg))
+    }
+    return fields
+  }
+  return [String(error)]
+}
+
+/**
  * 检测错误消息是否为模型不兼容错误
- * errMsg 可能只含 e.message（如 "request failed"），rawError 的其他字段（name/type）可能才含模型错误标识
  */
 function isModelError(errMsg: string, rawError?: unknown): boolean {
   const check = (s: string) => {
@@ -130,15 +146,7 @@ function isModelError(errMsg: string, rawError?: unknown): boolean {
     return l.includes("model not found") || l.includes("modelnotfound")
   }
   if (check(errMsg)) return true
-  if (rawError && typeof rawError === "object") {
-    const e = rawError as Record<string, unknown>
-    const fields = [e.type, e.name, e.message].filter(Boolean).map(String)
-    if (e.data && typeof e.data === "object" && "message" in e.data) {
-      const dataMsg = e.data.message
-      if (dataMsg) fields.push(String(dataMsg))
-    }
-    return fields.some(check)
-  }
+  if (rawError) return extractErrorFields(rawError).some(check)
   return false
 }
 
@@ -274,23 +282,11 @@ async function resolveLatestModel(
   directory?: string,
 ): Promise<{ providerID: string; modelID: string } | undefined> {
   const pattern = /model not found:?\s*(\w[\w-]*)\//i
-  const fields: string[] = []
-  if (typeof rawError === "string") {
-    fields.push(rawError)
-  } else if (rawError && typeof rawError === "object") {
-    const e = rawError as Record<string, unknown>
-    for (const key of ["message", "type", "name"]) {
-      if (e[key]) fields.push(String(e[key]))
-    }
-    if (e.data && typeof e.data === "object" && "message" in e.data) {
-      const dataMsg = (e.data as { message?: unknown }).message
-      if (dataMsg) fields.push(String(dataMsg))
-    }
-  } else {
-    fields.push(String(rawError))
-  }
-  const providerID = fields.map(f => pattern.exec(f)?.[1]).find(Boolean)
-  if (!providerID) return undefined
+  const fields = extractErrorFields(rawError)
+  const rawProviderID = fields.map(f => pattern.exec(f)?.[1]).find(Boolean)
+  if (!rawProviderID) return undefined
+  // provider API 的 id 是小写的，错误消息可能是 "OpenAI/..." 等混合大小写
+  const providerID = rawProviderID.toLowerCase()
 
   const query = directory ? { directory } : undefined
   const { data } = await client.provider.list({ query })

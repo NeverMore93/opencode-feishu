@@ -56,14 +56,17 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     parts,
   })
 
+  // 构建 prompt body（含可能的模型降级覆盖）
+  const modelOverride = getModelOverride(sessionKey)
+  const baseBody = { parts, ...(modelOverride ? { model: modelOverride } : {}) }
+
   // 静默监听模式：消息发给 OpenCode 作为上下文，不触发 AI 回复
   if (!shouldReply) {
     try {
-      const modelOverride = getModelOverride(sessionKey)
       await client.session.prompt({
         path: { id: session.id },
         query,
-        body: { parts, noReply: true, ...(modelOverride ? { model: modelOverride } : {}) },
+        body: { ...baseBody, noReply: true },
       })
     } catch (err) {
       log("warn", "静默转发失败", {
@@ -101,11 +104,10 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       : null
 
   try {
-    const modelOverride = getModelOverride(sessionKey)
     await client.session.prompt({
       path: { id: session.id },
       query,
-      body: { parts, ...(modelOverride ? { model: modelOverride } : {}) },
+      body: baseBody,
     })
 
     const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query })
