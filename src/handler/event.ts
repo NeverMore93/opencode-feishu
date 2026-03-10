@@ -23,6 +23,35 @@ export interface EventDeps {
 }
 
 const pendingBySession = new Map<string, PendingReplyPayload>()
+const sessionErrors = new Map<string, string>()
+const sessionErrorTimeouts = new Map<string, NodeJS.Timeout>()
+const SESSION_ERROR_TTL_MS = 30_000
+
+export function getSessionError(sessionId: string): string | undefined {
+  return sessionErrors.get(sessionId)
+}
+
+export function clearSessionError(sessionId: string): void {
+  const timer = sessionErrorTimeouts.get(sessionId)
+  if (timer) {
+    clearTimeout(timer)
+    sessionErrorTimeouts.delete(sessionId)
+  }
+  sessionErrors.delete(sessionId)
+}
+
+function setSessionError(sessionId: string, errMsg: string): void {
+  const existing = sessionErrorTimeouts.get(sessionId)
+  if (existing) {
+    clearTimeout(existing)
+  }
+  sessionErrors.set(sessionId, errMsg)
+  const timeoutId = setTimeout(() => {
+    sessionErrors.delete(sessionId)
+    sessionErrorTimeouts.delete(sessionId)
+  }, SESSION_ERROR_TTL_MS)
+  sessionErrorTimeouts.set(sessionId, timeoutId)
+}
 
 export function registerPending(
   sessionId: string,
@@ -97,6 +126,7 @@ export async function handleEvent(
       if (!sessionId) break
 
       const errMsg = ((props.error as Record<string, unknown>)?.message ?? String(props.error)) as string
+      setSessionError(sessionId, errMsg)
 
       // 模型不兼容错误：主动 fork 会话，更新缓存
       if (isModelError(errMsg)) {
@@ -123,14 +153,8 @@ export async function handleEvent(
         }
       }
 
-      // 仍然向飞书发送错误提示（当前 prompt 已失败）
-      const payload = pendingBySession.get(sessionId)
-      if (!payload) break
-
-      const updateRes = await sender.updateMessage(payload.feishuClient, payload.placeholderId, `❌ 会话错误: ${errMsg}`)
-      if (!updateRes.ok) {
-        await sender.sendTextMessage(payload.feishuClient, payload.chatId, `❌ 会话错误: ${errMsg}`)
-      }
+      // 不在此处向用户发送错误消息——由 chat.ts catch 块统一处理
+      // 避免 event.ts 和 chat.ts 双重发送错误消息
       break
     }
     default:

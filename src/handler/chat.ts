@@ -4,10 +4,13 @@
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import * as sender from "../feishu/sender.js"
-import { registerPending, unregisterPending } from "./event.js"
+import { registerPending, unregisterPending, getSessionError, clearSessionError } from "./event.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
+
+/** SSE 事件竞态等待窗口（ms），让 session.error 有机会在 HTTP 错误后到达 */
+const SSE_RACE_WAIT_MS = 100
 
 /** 每个会话的活跃自动提示循环，用于用户介入时中断 */
 const activeAutoPrompts = new Map<string, AbortController>()
@@ -42,6 +45,16 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   // 提取消息内容为 OpenCode parts
   const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log)
   if (!parts.length) return
+
+  log("info", "收到用户消息", {
+    sessionKey,
+    sessionId: session.id,
+    chatType,
+    senderId,
+    messageType,
+    shouldReply,
+    parts,
+  })
 
   // 静默监听模式：消息发给 OpenCode 作为上下文，不触发 AI 回复
   if (!shouldReply) {
@@ -137,10 +150,20 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       }
     }
   } catch (err) {
+    // 等待一个微小窗口，让可能在途的 session.error 事件有机会到达并被处理
+    await new Promise(r => setTimeout(r, SSE_RACE_WAIT_MS))
+
+    // 优先使用 session.error 事件中的实际错误信息（prompt() 常抛出无意义的 JSON 解析错误）
+    const sessionError = getSessionError(session.id)
+    clearSessionError(session.id)
+    const thrownError = err instanceof Error ? err.message : String(err)
+    const errorMessage = sessionError || thrownError
+
     log("error", "对话处理失败", {
-      error: err instanceof Error ? err.message : String(err),
+      error: thrownError,
+      ...(sessionError ? { sessionError } : {}),
     })
-    const msg = "❌ " + (err instanceof Error ? err.message : String(err))
+    const msg = "❌ " + errorMessage
     await replyOrUpdate(feishuClient, chatId, placeholderId, msg)
   } finally {
     done = true
