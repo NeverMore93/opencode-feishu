@@ -28,11 +28,6 @@ export interface ChatDeps {
   directory: string
 }
 
-/** 脱敏 sessionKey（隐藏末段用户/群 ID） */
-function maskKey(sessionKey: string): string {
-  return sessionKey.replace(/-[^-]+$/, "-***")
-}
-
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Promise<void> {
   const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId } = ctx
   if (!content.trim() && messageType === "text") return
@@ -47,7 +42,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   if (existing) {
     existing.abort()
     activeAutoPrompts.delete(sessionKey)
-    log("info", "用户介入，自动提示已中断", { sessionKey: maskKey(sessionKey) })
+    log("info", "用户介入，自动提示已中断", { sessionKey: sessionKey })
   }
 
   const session = await getOrCreateSession(client, sessionKey, directory)
@@ -57,7 +52,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
   if (!parts.length) return
 
   log("info", "收到用户消息", {
-    sessionKey: maskKey(sessionKey),
+    sessionKey: sessionKey,
     sessionId: session.id,
     chatType,
     senderId,
@@ -120,13 +115,13 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
     const ac = new AbortController()
     activeAutoPrompts.set(sessionKey, ac)
-    log("info", "启动自动提示循环", { sessionKey: maskKey(sessionKey), maxIterations: autoPrompt.maxIterations })
+    log("info", "启动自动提示循环", { sessionKey: sessionKey, maxIterations: autoPrompt.maxIterations })
 
     try {
       for (let i = 0; i < autoPrompt.maxIterations; i++) {
         await abortableSleep(autoPrompt.intervalSeconds * 1000, ac.signal)
 
-        log("info", "发送自动提示", { sessionKey: maskKey(sessionKey), iteration: i + 1 })
+        log("info", "发送自动提示", { sessionKey: sessionKey, iteration: i + 1 })
 
         await client.session.prompt({
           path: { id: activeId },
@@ -137,7 +132,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
         const text = await pollForResponse(client, activeId, { timeout, pollInterval, stablePolls, query, signal: ac.signal })
         if (text) {
           log("info", "自动提示响应", {
-            sessionKey: maskKey(sessionKey),
+            sessionKey: sessionKey,
             iteration: i + 1,
             output: text,
           })
@@ -145,13 +140,13 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
         }
       }
 
-      log("info", "自动提示循环结束（达到最大次数）", { sessionKey: maskKey(sessionKey) })
+      log("info", "自动提示循环结束（达到最大次数）", { sessionKey: sessionKey })
     } catch (loopErr) {
       if ((loopErr as Error).name === "AbortError") {
-        log("info", "自动提示循环被中断", { sessionKey: maskKey(sessionKey) })
+        log("info", "自动提示循环被中断", { sessionKey: sessionKey })
       } else {
         log("error", "自动提示循环异常", {
-          sessionKey: maskKey(sessionKey),
+          sessionKey: sessionKey,
           error: loopErr instanceof Error ? loopErr.message : String(loopErr),
         })
       }
@@ -170,7 +165,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
     const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query })
 
     log("info", "模型响应完成", {
-      sessionKey: maskKey(sessionKey),
+      sessionKey: sessionKey,
       sessionId: session.id,
       output: finalText || "(empty)",
     })
@@ -214,14 +209,14 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
             modelOverride = await resolveLatestModel(client, sessionError.fields, directory)
             if (modelOverride) {
               log("info", "已解析降级模型", {
-                sessionKey: maskKey(sessionKey),
+                sessionKey: sessionKey,
                 providerID: modelOverride.providerID,
                 modelID: modelOverride.modelID,
               })
             }
           } catch (modelErr) {
             log("warn", "解析降级模型失败，将使用默认模型", {
-              sessionKey: maskKey(sessionKey),
+              sessionKey: sessionKey,
               error: modelErr instanceof Error ? modelErr.message : String(modelErr),
             })
           }
@@ -243,7 +238,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
           const finalText = await pollForResponse(client, newSession.id, { timeout, pollInterval, stablePolls, query })
 
           log("info", "恢复后模型响应完成", {
-            sessionKey: maskKey(sessionKey),
+            sessionKey: sessionKey,
             newSessionId: newSession.id,
             output: finalText || "(empty)",
           })
@@ -254,7 +249,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
           log("info", "模型不兼容恢复成功", {
             oldSessionId: session.id,
             newSessionId: newSession.id,
-            sessionKey: maskKey(sessionKey),
+            sessionKey: sessionKey,
             forkAttempt: attempts + 1,
           })
 
@@ -269,14 +264,14 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
           sessionError = newSessionError ?? { message: recoveryErrMsg, fields: [] }
           log("error", "模型恢复失败", {
             sessionId: session.id,
-            sessionKey: maskKey(sessionKey),
+            sessionKey: sessionKey,
             error: recoveryErrMsg,
           })
           // fall through 到正常错误处理
         }
       } else {
         log("warn", "已达 fork 上限，放弃恢复", {
-          sessionKey: maskKey(sessionKey),
+          sessionKey: sessionKey,
           attempts,
         })
       }
@@ -288,7 +283,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
     log("error", "对话处理失败", {
       sessionId: session.id,
-      sessionKey: maskKey(sessionKey),
+      sessionKey: sessionKey,
       chatType,
       error: thrownError,
       ...(sessionError

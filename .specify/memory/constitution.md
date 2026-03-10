@@ -1,8 +1,8 @@
 <!--
 Sync Impact Report
 ==================
-- Version change: 2.2.0 → 2.3.0 (MINOR)
-- Modified principles: 八（日志规范）— 新增完整日志要求：不截断用户输入、模型输出、异常报错
+- Version change: 2.3.0 → 2.3.1 (PATCH)
+- Modified principles: 八（日志规范）— 移除 maskKey 脱敏要求
 - Added sections: None
 - Removed sections: None
 - Templates requiring updates: None
@@ -69,7 +69,6 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 日志级别：info、warn、error
 - 关键事件必须记录：配置加载、健康检查、消息处理、错误异常
 - 完整日志：MUST 不截断用户输入、模型输出、异常报错的内容
-- sessionKey MUST 使用 `maskKey()` 脱敏后再写入日志
 - 日志仅在 `FEISHU_DEBUG=1` 时输出到 stderr，不影响生产管道
 
 ### 九、错误处理
@@ -110,4 +109,4 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 
 所有代码变更和文档修改必须符合本约定。
 
-**版本**: 2.3.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-10
+**版本**: 2.3.1 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-10
