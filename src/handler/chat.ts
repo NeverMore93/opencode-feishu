@@ -161,7 +161,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
 
     log("error", "对话处理失败", {
       sessionId: session.id,
-      sessionKey,
+      sessionKey: sessionKey.replace(/-[^-]+$/, "-***"),
       chatType,
       error: thrownError,
       ...(sessionError ? { sessionError } : {}),
