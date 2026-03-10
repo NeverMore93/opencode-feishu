@@ -24,6 +24,7 @@ export interface EventDeps {
 
 const pendingBySession = new Map<string, PendingReplyPayload>()
 const sessionErrors = new Map<string, string>()
+const sessionErrorTimeouts = new Map<string, NodeJS.Timeout>()
 const SESSION_ERROR_TTL_MS = 30_000
 
 export function getSessionError(sessionId: string): string | undefined {
@@ -31,16 +32,25 @@ export function getSessionError(sessionId: string): string | undefined {
 }
 
 export function clearSessionError(sessionId: string): void {
+  const timer = sessionErrorTimeouts.get(sessionId)
+  if (timer) {
+    clearTimeout(timer)
+    sessionErrorTimeouts.delete(sessionId)
+  }
   sessionErrors.delete(sessionId)
 }
 
 function setSessionError(sessionId: string, errMsg: string): void {
+  const existing = sessionErrorTimeouts.get(sessionId)
+  if (existing) {
+    clearTimeout(existing)
+  }
   sessionErrors.set(sessionId, errMsg)
-  setTimeout(() => {
-    if (sessionErrors.get(sessionId) === errMsg) {
-      sessionErrors.delete(sessionId)
-    }
+  const timeoutId = setTimeout(() => {
+    sessionErrors.delete(sessionId)
+    sessionErrorTimeouts.delete(sessionId)
   }, SESSION_ERROR_TTL_MS)
+  sessionErrorTimeouts.set(sessionId, timeoutId)
 }
 
 export function registerPending(
