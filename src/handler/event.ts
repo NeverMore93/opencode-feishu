@@ -85,6 +85,11 @@ function isModelError(errMsg: string, rawError?: unknown): boolean {
   if (rawError && typeof rawError === "object") {
     const e = rawError as Record<string, unknown>
     const fields = [e.type, e.name, e.message].filter(Boolean).map(String)
+    // 也检查 data.message（SDK 错误类型的嵌套结构）
+    if (e.data && typeof e.data === "object" && "message" in e.data) {
+      const dataMsg = e.data.message
+      if (dataMsg) fields.push(String(dataMsg))
+    }
     return fields.some(f => f.includes("ModelNotFound") || f.includes("ProviderModelNotFound"))
   }
   return false
@@ -139,13 +144,21 @@ export async function handleEvent(
         errMsg = error
       } else if (error && typeof error === "object") {
         const e = error as Record<string, unknown>
-        errMsg = String(e.message ?? e.type ?? e.name ?? "An unexpected error occurred")
+        const rawDataMsg = (e.data && typeof e.data === "object" && "message" in e.data)
+          ? (e.data as { message?: unknown }).message
+          : undefined
+        const dataMsg = rawDataMsg != null ? String(rawDataMsg) : undefined
+        errMsg = String(e.message ?? dataMsg ?? e.type ?? e.name ?? "An unexpected error occurred")
       } else {
         errMsg = String(error)
       }
 
       const safeErrorFields = error && typeof error === "object"
-        ? { type: (error as Record<string, unknown>).type, name: (error as Record<string, unknown>).name }
+        ? {
+            type: (error as Record<string, unknown>).type,
+            name: (error as Record<string, unknown>).name,
+            dataMessage: ((error as Record<string, unknown>).data as Record<string, unknown> | undefined)?.message,
+          }
         : { raw: String(error) }
       deps.log("warn", "收到 session.error 事件", {
         sessionId,
