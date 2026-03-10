@@ -167,7 +167,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
       sessionKey: sessionKey.replace(/-[^-]+$/, "-***"),
       chatType,
       error: thrownError,
-      ...(sessionError ? { sessionError } : {}),
+      ...(sessionError
+        ? { sessionError }
+        : { sseRaceMiss: true }),
     })
     const msg = "❌ " + errorMessage
     await replyOrUpdate(feishuClient, chatId, placeholderId, msg)
