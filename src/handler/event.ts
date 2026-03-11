@@ -122,11 +122,11 @@ export function extractErrorFields(error: unknown): string[] {
  * 检测错误字段是否包含模型不兼容错误
  */
 export function isModelError(fields: string[]): boolean {
-  const check = (s: string) => {
-    const l = s.toLowerCase()
-    return l.includes("model not found") || l.includes("modelnotfound")
-  }
-  return fields.some(check)
+  const patterns = ["model not found", "modelnotfound", "model not supported", "model_not_supported"]
+  return fields.some(f => {
+    const l = f.toLowerCase()
+    return patterns.some(p => l.includes(p))
+  })
 }
 
 /**

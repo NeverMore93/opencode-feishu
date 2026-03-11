@@ -142,10 +142,11 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **事件处理器 (`src/handler/event.ts`):**
 - 处理 `message.part.updated` 实时更新占位消息
-- 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map
+- 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map、检测模型不兼容错误
+- `isModelError()`：检测 "model not found"、"ModelNotFound"、"model not supported"、"model_not_supported" 等模型错误
 - 管理 `pendingBySession` 映射（sessionId → 飞书占位消息）
 - 管理 `retryAttempts` 计数器（防止无限重试循环，上限 2 次）
-- 管理 `sessionErrors` 映射（30s TTL，供 chat.ts 消费真实错误）
+- 管理 `sessionErrors` 映射（30s TTL，供 chat.ts pollForResponse 和 catch 块消费）
 
 **历史摄入 (`src/feishu/history.ts`):**
 - 通过飞书 API 获取最近 50 条群消息
@@ -246,14 +247,20 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 提取优先级：`e.message` → `data.message` → `e.type` → `e.name` → 兜底文案
 - SDK `UnknownError` 类型的 `data.message` 是 required 字段，存放原始错误名
 
-**L2 模型不兼容自动恢复**（chat.ts）：检测 `ModelNotFound`/`ProviderModelNotFound` 错误时在同一 session 上重试
-- `resolveLatestModel()`：从错误消息提取失败的 `providerID/modelID`，遍历所有已连接 provider（`data.connected`），排除失败模型，返回可用模型或 undefined
-- 恢复策略：在同一 session 上用 per-request model override 重试 prompt（session 未损坏，model 是 per-request），不 fork、不创建新 session
-- 重试计数器：每 sessionKey 最多重试 2 次，防止无限循环；成功后重置计数
-- 当无任何已连接 provider 有可用模型时，直接向用户显示错误，不重试
+**L2 轮询期间 SSE 错误检测**（chat.ts pollForResponse）：每次 poll 周期检查 `getSessionError()`
+- `pollForResponse()` 在 sleep 后、API 调用前检查 SSE 缓存的 session error
+- 检测到错误时抛出 `SessionErrorDetected` 异常（携带 sessionError 信息），立即终止轮询
+- 使模型异步失败（prompt 成功但模型报错）在 ~1 秒内被检测，而非等待 120 秒超时
 
-**L3 竞态协调**（chat.ts）：prompt() HTTP 响应和 SSE session.error 并行到达
-- catch 块等待 100ms（`SSE_RACE_WAIT_MS`）让 SSE 事件先到达
+**L3 模型不兼容自动恢复**（chat.ts）：检测模型错误时用全局默认模型重试
+- `getGlobalDefaultModel()`：通过 `client.config.get()` 读取 `Config.model` 字段（如 `"aigw/claude-opus-4-6-v1"`），解析为 `{ providerID, modelID }`
+- 恢复策略：只用全局配置的默认模型，不在失败 provider 内搜索替代
+- 重试计数器：每 sessionKey 最多重试 2 次，防止无限循环；成功后重置计数
+- 全局默认模型未配置时，直接向用户显示错误，不重试
+
+**L4 竞态协调**（chat.ts catch 块）：prompt() HTTP 响应和 SSE session.error 并行到达
+- `SessionErrorDetected` 异常：来自 pollForResponse 的 SSE 检测，无需竞态等待
+- 非 SSE 检测错误：catch 块等待 100ms（`SSE_RACE_WAIT_MS`）让 SSE 事件先到达
 - 优先使用 `getSessionError()` 缓存的真实错误，而非 prompt() 抛出的 JSON 解析错误
 - 错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）
 
