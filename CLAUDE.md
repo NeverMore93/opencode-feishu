@@ -1,4 +1,4 @@
-﻿# CLAUDE.md
+# CLAUDE.md
 
 本文件为 Claude Code (claude.ai/code) 在此代码仓库中工作时提供指导。
 
@@ -143,7 +143,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 **事件处理器 (`src/handler/event.ts`):**
 - 处理 `message.part.updated` 实时更新占位消息
 - 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map、检测模型不兼容错误
-- `isModelError()`：检测 "model not found"、"ModelNotFound"、"model not supported"、"model_not_supported" 等模型错误
+- `isModelError()`：双层匹配策略 — 层1 精确子串（已知错误码），层2 关键词组合（"model" + 否定词，覆盖未知变体）
 - 管理 `pendingBySession` 映射（sessionId → 飞书占位消息）
 - 管理 `retryAttempts` 计数器（防止无限重试循环，上限 2 次）
 - 管理 `sessionErrors` 映射（30s TTL，供 chat.ts pollForResponse 和 catch 块消费）
@@ -245,7 +245,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **L1 错误提取**（event.ts）：从 `session.error` SSE 事件提取有意义的错误消息
 - `errMsg` 提取优先级：`e.message` → `data.message` → `e.type` → `e.name` → 兜底文案
-- `extractErrorFields()`：全量提取错误对象所有顶层 string 值（`Object.values` 策略，不维护字段名白名单），加上 `data.message` 嵌套字段
+- `extractErrorFields()`：递归提取错误对象所有 string 值（最大深度 3），自动覆盖任何嵌套结构（data.message、data.error.code 等），无需手动维护字段名或层级
 - SDK `UnknownError` 类型的 `data.message` 是 required 字段，存放原始错误名
 
 **L2 轮询期间 SSE 错误检测**（chat.ts pollForResponse）：每次 poll 周期检查 `getSessionError()`

@@ -112,40 +112,52 @@ export function unregisterPending(sessionId: string): void {
 export function extractErrorFields(error: unknown): string[] {
   if (typeof error === "string") return [error]
   if (error && typeof error === "object") {
-    const e = error as Record<string, unknown>
-    // 显式提取可能不可枚举的标准 Error 属性
-    const explicit = [e.message, e.type, e.name]
-    // 提取所有可枚举顶层 string 值（覆盖 code 及未来新增字段）
-    const enumerable = Object.values(e)
-    const fields = [...explicit, ...enumerable]
-      .filter((v): v is string => typeof v === "string" && v.length > 0)
-    // 提取 data.message 嵌套字段（SDK UnknownError 的标准结构）
-    if (e.data && typeof e.data === "object" && "message" in e.data) {
-      const dataMsg = e.data.message
-      if (typeof dataMsg === "string" && dataMsg.length > 0) fields.push(dataMsg)
-    }
-    // 提取 data.error 嵌套字段（API 错误响应标准结构：{ error: { message, code, type } }）
-    if (e.data && typeof e.data === "object" && "error" in e.data) {
-      const dataErr = (e.data as Record<string, unknown>).error
-      if (dataErr && typeof dataErr === "object") {
-        const errStrings = Object.values(dataErr as Record<string, unknown>)
-          .filter((v): v is string => typeof v === "string" && v.length > 0)
-        fields.push(...errStrings)
-      }
-    }
+    const fields: string[] = []
+    collectStrings(error, fields, 3)
     return [...new Set(fields)]
   }
   return [String(error)]
 }
 
 /**
- * 检测错误字段是否包含模型不兼容错误
+ * 递归提取对象中所有 string 值（最大深度限制防止循环引用）。
+ * 同时显式提取 message/type/name（可能不可枚举）。
+ */
+function collectStrings(obj: unknown, out: string[], maxDepth: number): void {
+  if (maxDepth <= 0 || !obj || typeof obj !== "object") return
+  const e = obj as Record<string, unknown>
+  // 显式提取可能不可枚举的标准 Error 属性
+  for (const key of ["message", "type", "name"]) {
+    const v = e[key]
+    if (typeof v === "string" && v.length > 0) out.push(v)
+  }
+  // 提取所有可枚举值：string 直接收集，object 递归下探
+  for (const v of Object.values(e)) {
+    if (typeof v === "string" && v.length > 0) out.push(v)
+    else if (v && typeof v === "object" && !Array.isArray(v)) collectStrings(v, out, maxDepth - 1)
+  }
+}
+
+/**
+ * 检测错误字段是否包含模型不兼容错误。
+ *
+ * 双层匹配策略防止再犯：
+ * 1. 精确子串：覆盖已知的错误码和格式化字符串
+ * 2. 关键词组合：检测 "model" + 否定/不可用语义词，覆盖未知的自然语言变体
  */
 export function isModelError(fields: string[]): boolean {
-  const patterns = ["model not found", "modelnotfound", "model not supported", "model_not_supported", "model is not supported"]
+  const exactPatterns = [
+    "model not found", "modelnotfound", "model_not_found",
+    "model not supported", "model_not_supported", "model is not supported",
+  ]
+  const negativeWords = ["not", "unsupported", "invalid", "unavailable", "unknown", "does not", "doesn't", "cannot", "不支持", "不存在", "无效"]
   return fields.some(f => {
     const l = f.toLowerCase()
-    return patterns.some(p => l.includes(p))
+    // 层 1：精确子串匹配（已知模式）
+    if (exactPatterns.some(p => l.includes(p))) return true
+    // 层 2：关键词组合匹配（"model" + 否定词 = 模型不可用）
+    if (l.includes("model") && negativeWords.some(w => l.includes(w))) return true
+    return false
   })
 }
 
