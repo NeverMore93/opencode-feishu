@@ -272,7 +272,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
               sessionError = sseError
               clearSessionError(session.id)
             } else {
-              sessionError = { message: errMsg, fields: [] }
+              const thrownFields = extractErrorFields(recoveryErr)
+              sessionError = { message: errMsg, fields: thrownFields }
             }
           }
           log("error", "模型恢复失败", {
