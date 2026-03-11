@@ -124,6 +124,15 @@ export function extractErrorFields(error: unknown): string[] {
       const dataMsg = e.data.message
       if (typeof dataMsg === "string" && dataMsg.length > 0) fields.push(dataMsg)
     }
+    // 提取 data.error 嵌套字段（API 错误响应标准结构：{ error: { message, code, type } }）
+    if (e.data && typeof e.data === "object" && "error" in e.data) {
+      const dataErr = (e.data as Record<string, unknown>).error
+      if (dataErr && typeof dataErr === "object") {
+        const errStrings = Object.values(dataErr as Record<string, unknown>)
+          .filter((v): v is string => typeof v === "string" && v.length > 0)
+        fields.push(...errStrings)
+      }
+    }
     return [...new Set(fields)]
   }
   return [String(error)]
@@ -133,7 +142,7 @@ export function extractErrorFields(error: unknown): string[] {
  * 检测错误字段是否包含模型不兼容错误
  */
 export function isModelError(fields: string[]): boolean {
-  const patterns = ["model not found", "modelnotfound", "model not supported", "model_not_supported"]
+  const patterns = ["model not found", "modelnotfound", "model not supported", "model_not_supported", "model is not supported"]
   return fields.some(f => {
     const l = f.toLowerCase()
     return patterns.some(p => l.includes(p))
