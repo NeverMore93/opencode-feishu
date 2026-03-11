@@ -258,6 +258,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
             return
           }
         } catch (recoveryErr) {
+          const errMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
           // 恢复重试的 pollForResponse 也可能检测到 SSE 错误
           if (recoveryErr instanceof SessionErrorDetected) {
             sessionError = recoveryErr.sessionError
@@ -265,10 +266,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps): Pro
           } else {
             const retryError = getSessionError(session.id)
             if (retryError) clearSessionError(session.id)
-            const recoveryErrMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
-            sessionError = retryError ?? { message: recoveryErrMsg, fields: [] }
+            sessionError = retryError ?? { message: errMsg, fields: [] }
           }
-          const errMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
           log("error", "模型恢复失败", {
             sessionId: session.id,
             sessionKey,
@@ -319,7 +318,10 @@ async function getGlobalDefaultModel(
   const model = config?.model
   if (!model || !model.includes("/")) return undefined
   const slash = model.indexOf("/")
-  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+  const providerID = model.slice(0, slash).trim()
+  const modelID = model.slice(slash + 1).trim()
+  if (!providerID || !modelID) return undefined
+  return { providerID, modelID }
 }
 
 /**
