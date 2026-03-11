@@ -143,3 +143,37 @@ grep "session.error" logs/stderr.txt | head -1
 3. 用端到端测试验证恢复流程触发
 
 v0.7.13 的诊断日志让步骤 1 自动化了。步骤 2 和 3 仍需手动执行。
+
+## 七、v0.7.14 — 真正防止再犯的改进
+
+### 问题：v0.7.13 为什么不能防止再犯？
+
+v0.7.13 的修复仍然是**逐个症状打补丁**：
+- 添加 `"model is not supported"` 到精确模式列表 → 下一个变体 `"unsupported model"` 又会失败
+- 添加 `data.error` 嵌套提取 → 下一个格式 `data.details.error` 又会失败
+
+### 解决：两个架构级改进
+
+**1. `extractErrorFields` → 递归字符串提取**
+- 用 `collectStrings(obj, maxDepth=3)` 替代硬编码层级
+- 自动提取任何深度（≤3）的 string 值
+- 无需为每种新的 API 响应格式手动添加提取逻辑
+
+**2. `isModelError` → 双层匹配策略**
+- 层 1（精确子串）：覆盖已知的错误码和格式化字符串
+- 层 2（关键词组合）：检测 "model" + 否定/不可用语义词
+- 层 2 能自动覆盖未知的自然语言变体，如：
+  - `"unsupported model"` → "model" + "unsupported" ✅
+  - `"model does not exist"` → "model" + "does not" ✅
+  - `"invalid model specified"` → "model" + "invalid" ✅
+
+### 为什么这能防止再犯？
+
+| 场景 | v0.7.13（精确匹配） | v0.7.14（关键词组合） |
+|------|---------------------|----------------------|
+| 新 provider: "unsupported model" | ❌ 需手动添加 | ✅ "model" + "unsupported" |
+| 新格式: "model does not exist" | ❌ 需手动添加 | ✅ "model" + "does not" |
+| 新嵌套: data.details.error.code | ❌ 需手动添加 | ✅ 递归深度 3 自动提取 |
+| 全新概念: "quota exceeded" | ❌ | ❌（不是模型错误） |
+
+**误匹配风险**：层 2 可能误匹配 "model training not complete" 这类非模型不兼容错误。但后果仅是触发一次恢复重试（用默认模型重新 prompt），不会造成数据丢失。宁可多试一次，不可漏过真正的模型错误。
