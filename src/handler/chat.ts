@@ -419,6 +419,12 @@ async function pollForResponse(
     }
   }
 
+  // 返回前再次检查 SSE 错误，防止 break 后遗漏的竞态错误
+  const finalSseError = getSessionError(sessionId)
+  if (finalSseError) {
+    throw new SessionErrorDetected(finalSseError)
+  }
+
   const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
   return extractLastAssistantText(finalMessages ?? []) || lastText
 }
