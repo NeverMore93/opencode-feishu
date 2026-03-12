@@ -6,7 +6,6 @@ import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { LogFn } from "../types.js"
 
 export interface CardKitSchema {
-  type: "card_kit"
   data: {
     schema: "2.0"
     config?: Record<string, unknown>

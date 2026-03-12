@@ -35,7 +35,6 @@ export class StreamingCard {
    */
   async start(): Promise<string> {
     const schema: CardKitSchema = {
-      type: "card_kit",
       data: {
         schema: "2.0",
         config: { streaming_mode: true, summary: { content: "正在思考..." } },
