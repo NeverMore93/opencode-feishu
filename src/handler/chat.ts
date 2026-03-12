@@ -14,6 +14,10 @@ import {
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
+import { subscribe } from "./action-bus.js"
+import type { CardKitClient } from "../feishu/cardkit.js"
+import { StreamingCard } from "../feishu/streaming-card.js"
+import { handlePermissionRequested, handleQuestionRequested, type InteractiveDeps } from "./interactive.js"
 
 /** 每个会话的活跃自动提示循环，用于用户介入时中断 */
 const activeAutoPrompts = new Map<string, AbortController>()
@@ -24,6 +28,36 @@ export interface ChatDeps {
   feishuClient: InstanceType<typeof Lark.Client>
   log: LogFn
   directory: string
+  cardkit?: CardKitClient
+  interactiveDeps?: InteractiveDeps
+}
+
+/** 最终回复：关闭流式卡片或更新占位消息 */
+async function finalizeReply(
+  streamingCard: StreamingCard | undefined,
+  feishuClient: InstanceType<typeof Lark.Client>,
+  chatId: string,
+  placeholderId: string,
+  text: string,
+): Promise<void> {
+  if (streamingCard) {
+    await streamingCard.close(text)
+  } else {
+    await replyOrUpdate(feishuClient, chatId, placeholderId, text)
+  }
+}
+
+/** 中断清理：删除流式卡片或占位消息 */
+async function abortCleanup(
+  streamingCard: StreamingCard | undefined,
+  feishuClient: InstanceType<typeof Lark.Client>,
+  placeholderId: string,
+): Promise<void> {
+  if (streamingCard) {
+    await streamingCard.destroy()
+  } else if (placeholderId) {
+    await sender.deleteMessage(feishuClient, placeholderId).catch(() => {})
+  }
 }
 
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<void> {
@@ -86,8 +120,28 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   let placeholderId = ""
   let done = false
   let activeSessionId = session.id
+  let streamingCard: StreamingCard | undefined
+
+  // 尝试创建流式卡片（fallback 到纯文本占位）
+  if (thinkingDelay > 0 && deps.cardkit) {
+    try {
+      streamingCard = new StreamingCard(deps.cardkit, feishuClient, chatId, log)
+      placeholderId = await streamingCard.start()
+    } catch (err) {
+      log("warn", "CardKit 创建失败，回退纯文本", {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      // 清理可能部分创建的卡片资源
+      if (streamingCard) {
+        await streamingCard.destroy().catch(() => {})
+      }
+      streamingCard = undefined
+    }
+  }
+
+  // 如果没有流式卡片，使用传统占位消息
   const timer =
-    thinkingDelay > 0
+    !streamingCard && thinkingDelay > 0
       ? setTimeout(async () => {
           if (done) return
           try {
@@ -154,6 +208,39 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     }
   }
 
+  // 订阅 action-bus 更新流式卡片 + 交互式卡片分发
+  let cardUnsub: (() => void) | undefined
+  {
+    const card = streamingCard
+    cardUnsub = subscribe(activeSessionId, (action) => {
+      switch (action.type) {
+        case "text-updated":
+          if (card) {
+            if (action.delta) {
+              card.updateText(action.delta)
+            } else if (action.fullText) {
+              // snapshot-style 事件：用 fullText 替换整个 buffer
+              card.replaceText(action.fullText)
+            }
+          }
+          break
+        case "tool-state-changed":
+          if (card) card.setToolStatus(action.callID, action.tool, action.state)
+          break
+        case "permission-requested":
+          if (deps.interactiveDeps) {
+            handlePermissionRequested(action.request, chatId, deps.interactiveDeps)
+          }
+          break
+        case "question-requested":
+          if (deps.interactiveDeps) {
+            handleQuestionRequested(action.request, chatId, deps.interactiveDeps)
+          }
+          break
+      }
+    })
+  }
+
   try {
     // 清除前次遗留的 session error 缓存，避免 pollForResponse 误检测旧错误
     clearSessionError(session.id)
@@ -175,16 +262,14 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     // prompt 成功：重置 fork 计数
     clearRetryAttempts(sessionKey)
 
-    await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
+    await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
     await runAutoPromptLoop(session.id)
   } catch (err) {
     // AbortError = 被新消息中断，清理占位消息后静默退出
     if (err instanceof Error && err.name === "AbortError") {
       log("info", "处理被中断", { sessionKey, sessionId: session.id })
-      if (placeholderId) {
-        await sender.deleteMessage(feishuClient, placeholderId).catch(() => {})
-      }
+      await abortCleanup(streamingCard, feishuClient, placeholderId)
       return
     }
 
@@ -247,7 +332,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
             })
 
             clearRetryAttempts(sessionKey)
-            await replyOrUpdate(feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
+            await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
             log("info", "模型不兼容恢复成功", {
               sessionId: session.id,
@@ -263,9 +348,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           // AbortError during recovery = interrupted
           if (recoveryErr instanceof Error && recoveryErr.name === "AbortError") {
             log("info", "模型恢复被中断", { sessionKey })
-            if (placeholderId) {
-              await sender.deleteMessage(feishuClient, placeholderId).catch(() => {})
-            }
+            await abortCleanup(streamingCard, feishuClient, placeholderId)
             return
           }
 
@@ -309,11 +392,11 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
         ? { sessionError: sessionError.message }
         : {}),
     })
-    const msg = "❌ " + errorMessage
-    await replyOrUpdate(feishuClient, chatId, placeholderId, msg)
+    await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, "❌ " + errorMessage)
   } finally {
     done = true
     if (timer) clearTimeout(timer)
+    if (cardUnsub) cardUnsub()
     unregisterPending(activeSessionId)
   }
 }
@@ -399,39 +482,55 @@ async function pollForResponse(
   let lastText = ""
   let sameCount = 0
 
-  while (Date.now() - start < timeout) {
-    if (signal) {
-      await abortableSleep(pollInterval, signal)
-    } else {
-      await new Promise((r) => setTimeout(r, pollInterval))
+  let sessionIdle = false
+  const unsub = subscribe(sessionId, (action) => {
+    if (action.type === "session-idle") {
+      sessionIdle = true
+    }
+  })
+
+  try {
+    while (Date.now() - start < timeout) {
+      if (signal) {
+        await abortableSleep(pollInterval, signal)
+      } else {
+        await new Promise((r) => setTimeout(r, pollInterval))
+      }
+
+      // 检查 SSE 缓存的 session error（FR-001）
+      const sseError = getSessionError(sessionId)
+      if (sseError) {
+        throw new SessionErrorDetected(sseError)
+      }
+
+      // session.idle 提前退出：收到信号后最后 fetch 一次
+      if (sessionIdle) {
+        break
+      }
+
+      const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
+      const text = extractLastAssistantText(messages ?? [])
+
+      if (text && text !== lastText) {
+        lastText = text
+        sameCount = 0
+      } else if (text && text.length > 0) {
+        sameCount++
+        if (sameCount >= stablePolls) break
+      }
     }
 
-    // 检查 SSE 缓存的 session error（FR-001）
-    const sseError = getSessionError(sessionId)
-    if (sseError) {
-      throw new SessionErrorDetected(sseError)
+    // 返回前再次检查 SSE 错误，防止 break 后遗漏的竞态错误
+    const finalSseError = getSessionError(sessionId)
+    if (finalSseError) {
+      throw new SessionErrorDetected(finalSseError)
     }
 
-    const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
-    const text = extractLastAssistantText(messages ?? [])
-
-    if (text && text !== lastText) {
-      lastText = text
-      sameCount = 0
-    } else if (text && text.length > 0) {
-      sameCount++
-      if (sameCount >= stablePolls) break
-    }
+    const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
+    return extractLastAssistantText(finalMessages ?? []) || lastText
+  } finally {
+    unsub()
   }
-
-  // 返回前再次检查 SSE 错误，防止 break 后遗漏的竞态错误
-  const finalSseError = getSessionError(sessionId)
-  if (finalSseError) {
-    throw new SessionErrorDetected(finalSseError)
-  }
-
-  const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
-  return extractLastAssistantText(finalMessages ?? []) || lastText
 }
 
 async function replyOrUpdate(

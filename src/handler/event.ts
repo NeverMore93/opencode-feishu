@@ -4,8 +4,9 @@
 import type { Event } from "@opencode-ai/sdk"
 
 import * as sender from "../feishu/sender.js"
-import type { LogFn } from "../types.js"
+import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
+import { emit } from "./action-bus.js"
 
 export interface PendingReplyPayload {
   chatId: string
@@ -197,6 +198,30 @@ export async function handleEvent(
         break
       }
 
+      const partSessionId = part.sessionID as string
+
+      // Emit tool-state-changed for tool parts (skip text-updated — tool parts have no text content)
+      if (part.type === "tool") {
+        const p = part as Record<string, unknown>
+        const toolName = String(p.toolName ?? p.name ?? "unknown")
+        const callID = String(p.toolCallID ?? p.id ?? "")
+        // tool part 的 state 字段可能存在；若无则根据 error 字段推断
+        const hasError = p.error !== undefined && p.error !== null
+        const rawState = p.state != null ? String(p.state) : (hasError ? "error" : "running")
+        const toolState = (rawState === "completed" || rawState === "error") ? rawState : "running" as const
+
+        if (partSessionId) {
+          emit(partSessionId, {
+            type: "tool-state-changed",
+            sessionId: partSessionId,
+            callID,
+            tool: toolName,
+            state: toolState,
+          })
+        }
+        break
+      }
+
       // delta 是增量文本，part.text 是全量文本
       const delta = (event.properties as { delta?: string }).delta
       if (delta) {
@@ -214,6 +239,17 @@ export async function handleEvent(
         if (!res.ok) {
           // best-effort: 更新失败不阻塞
         }
+      }
+
+      // Emit text-updated action to action-bus
+      if (partSessionId) {
+        emit(partSessionId, {
+          type: "text-updated",
+          sessionId: partSessionId,
+          messageId: part.messageID as string | undefined,
+          delta: delta ?? undefined,
+          fullText: payload.textBuffer,
+        })
       }
       break
     }
@@ -246,8 +282,34 @@ export async function handleEvent(
       // 不在此处做 fork 恢复或向用户发送错误——统一由 chat.ts catch 块处理
       break
     }
-    default:
+    default: {
+      // 处理 SDK Event 联合类型未覆盖的事件（v2 新增事件）
+      const evtType = (event as { type: string }).type
+      const evtProps = (event as { properties?: Record<string, unknown> }).properties ?? {}
+      const evtSessionId = evtProps.sessionID as string | undefined
+
+      if (evtType === "permission.asked" && evtSessionId) {
+        emit(evtSessionId, {
+          type: "permission-requested",
+          sessionId: evtSessionId,
+          request: evtProps as PermissionRequest,
+        })
+        deps.log("info", "permission.asked 事件已分发", { sessionId: evtSessionId })
+      } else if (evtType === "question.asked" && evtSessionId) {
+        emit(evtSessionId, {
+          type: "question-requested",
+          sessionId: evtSessionId,
+          request: evtProps as QuestionRequest,
+        })
+        deps.log("info", "question.asked 事件已分发", { sessionId: evtSessionId })
+      } else if (evtType === "session.idle" && evtSessionId) {
+        emit(evtSessionId, {
+          type: "session-idle",
+          sessionId: evtSessionId,
+        })
+      }
       break
+    }
   }
 }
 

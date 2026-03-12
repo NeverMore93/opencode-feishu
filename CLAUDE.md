@@ -12,7 +12,11 @@
 - 通过 OpenCode SDK `client` 管理会话和消息
 - 群聊静默监听（转发所有消息作为上下文，仅在被 @提及时回复）
 - 入群自动摄入历史消息
-- 通过插件 `event` 钩子接收 `message.part.updated` 事件实时更新占位消息
+- CardKit 2.0 流式卡片：AI 回复实时显示文本（markdown 渲染）和工具调用进度
+- 交互式卡片：权限审批和问答通过按钮完成（card.action.trigger WebSocket 回调）
+- 事件总线（action-bus）：per-session 事件订阅/发布，驱动流式卡片和交互卡片
+- Zod 配置验证：启动时结构化验证 feishu.json，拼写/类型错误立即报出
+- 通过插件 `event` 钩子接收 SSE 事件（message.part.updated、permission.asked、question.asked、session.idle）
 
 ## 项目约定（重要）
 
@@ -105,18 +109,26 @@ npm run build
 ### 插件架构
 ```
 OpenCode 加载插件 → src/index.ts (FeishuPlugin)
-    ├── config 钩子 → 读取 opencode.json 中的 feishu 配置
-    │   ├── fetchBotOpenId() → 获取 bot open_id
-    │   └── startFeishuGateway() → 启动 WebSocket 长连接
-    │       ├── im.message.receive_v1 → enqueueMessage() [session-queue]
-    │       │   ├── shouldReply=false → handleChat() 静默转发（绕过队列）
-    │       │   ├── P2P + shouldReply=true → 可中断策略（abort + 立即处理新消息）
-    │       │   └── Group + shouldReply=true → 串行排队（FIFO 顺序依次处理）
-    │       │       └── handleChat(ctx, deps, signal)
-    │       │           └── promptAsync() → 轮询 → sender
-    │       └── im.chat.member.bot.added_v1 → ingestGroupHistory()
-    └── event 钩子 → handleEvent()
-        ├── message.part.updated → 实时更新飞书占位消息（messageID 过滤）
+    ├── Zod 配置验证 → FeishuConfigSchema.parse(feishu.json)
+    ├── Lark Client → SDK 内置 token 管理 + HTTP 客户端（中央创建，传递给 gateway/cardkit）
+    ├── CardKitClient → SDK thin wrapper（委托 client.cardkit.v1.*）
+    ├── fetchBotOpenId(larkClient) → client.request() 获取 bot open_id
+    └── startFeishuGateway(larkClient) → 启动 WebSocket 长连接（复用 Client）
+        ├── im.message.receive_v1 → enqueueMessage() [session-queue]
+        │   ├── shouldReply=false → handleChat() 静默转发（绕过队列）
+        │   ├── P2P + shouldReply=true → 可中断策略（abort + 立即处理新消息）
+        │   └── Group + shouldReply=true → 串行排队（FIFO 顺序依次处理）
+        │       └── handleChat(ctx, deps, signal)
+        │           ├── StreamingCard.start() → 流式卡片（fallback 纯文本占位）
+        │           ├── subscribe(action-bus) → text/tool/permission/question 更新卡片
+        │           └── promptAsync() → 轮询（session.idle 提前退出）→ card.close()
+        ├── im.chat.member.bot.added_v1 → ingestGroupHistory()
+        └── card.action.trigger → handleCardAction() → v2Client.permission/question.reply()
+    event 钩子 → handleEvent()
+        ├── message.part.updated → 更新占位消息 + emit text-updated/tool-state-changed
+        ├── permission.asked → emit permission-requested（→ 交互卡片）
+        ├── question.asked → emit question-requested（→ 交互卡片）
+        ├── session.idle → emit session-idle（→ 轮询提前退出）
         └── session.error → 缓存错误 + 模型不兼容时自动恢复会话
 ```
 
@@ -124,13 +136,17 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **插件入口 (`src/index.ts`):**
 - 导出 `FeishuPlugin: Plugin`（命名导出）
-- `config` 钩子：从 `opencode.json` 的 `feishu` 字段读取配置，初始化飞书网关
-- `event` 钩子：接收 OpenCode 事件，处理 `message.part.updated` 和 `session.error`
+- Zod 配置验证：`FeishuConfigSchema.parse()` 替代手动 `??` 合并，启动时报出清晰错误
+- 创建 `Lark.Client`（SDK 内置 token 管理），传递给 `CardKitClient` 和 `startFeishuGateway`
+- `fetchBotOpenId()` 使用 `larkClient.request()` 自动认证（无手动 token 管理）
+- `event` 钩子：接收 OpenCode 事件，处理 6+ 事件类型并通过 action-bus 分发
 - 使用 `client.app.log()` 记录结构化日志
 
 **飞书网关 (`src/feishu/gateway.ts`):**
-- 使用 `@larksuiteoapi/node-sdk` 建立 WebSocket 连接
+- 接收外部创建的 `Lark.Client`（复用 token 管理和 HTTP 客户端）
+- 创建 `WSClient`（WebSocket 长连接，独立代理配置）
 - 处理 `im.message.receive_v1` 事件
+- 处理 `card.action.trigger` 卡片回调（权限/问答按钮，3 秒内返回 toast）
 - 消息去重（10 分钟窗口，通过 `dedup.ts`）
 - 群消息 @提及过滤（通过 `group-filter.ts`）
 - 处理 `im.chat.member.bot.added_v1` 用于历史摄入
@@ -148,17 +164,55 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 会话键格式：`feishu-p2p-<userId>` 或 `feishu-group-<chatId>`
 - 会话标题格式：`Feishu-<sessionKey>-<timestamp>`
 - 静默监听模式：`promptAsync({ noReply: true })`
-- 主动回复模式：占位消息 → 轮询 → 最终回复
+- 主动回复模式：`StreamingCard.start()` → action-bus 订阅 → 轮询（session.idle 提前退出）→ `card.close()`
 - 自动提示模式：响应完成后循环发送"继续" → 轮询 → 回复，直到 maxIterations 或用户中断
-- AbortError 处理：被中断时静默退出，不向用户发送错误
+- action-bus 订阅：text-updated → 卡片文本更新、tool-state-changed → 工具进度、permission/question → 交互卡片
+- StreamingCard 回退：CardKit 创建失败时自动降级为纯文本占位消息
+- AbortError 处理：被中断时调用 `card.destroy()` 删除消息，静默退出
 
 **事件处理器 (`src/handler/event.ts`):**
-- 处理 `message.part.updated` 实时更新占位消息（通过 messageID 过滤防止事件串扰）
+- 处理 `message.part.updated`：实时更新占位消息 + emit `text-updated`/`tool-state-changed` 到 action-bus
+- 处理 `permission.asked`/`question.asked`：emit 到 action-bus（→ 交互卡片）
+- 处理 `session.idle`：emit 到 action-bus（→ 轮询提前退出）
 - 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map、检测模型不兼容错误
 - `isModelError()`：双层匹配策略 — 层1 精确子串（已知错误码），层2 关键词组合（"model" + 否定词，覆盖未知变体）
 - 管理 `pendingBySession` 映射（sessionId → 飞书占位消息）
 - 管理 `retryAttempts` 计数器（防止无限重试循环，上限 2 次）
 - 管理 `sessionErrors` 映射（30s TTL，供 chat.ts pollForResponse 和 catch 块消费）
+
+**事件总线 (`src/handler/action-bus.ts`):**
+- per-session 事件订阅/发布：`subscribe(sessionId, cb)` 返回 unsubscribe 函数
+- `emit(sessionId, action)` fire-and-forget 分发，错误不阻塞
+- `unsubscribeAll(sessionId)` 清理所有订阅
+- `ProcessedAction` 联合类型：7 种事件（text-updated、tool-state-changed、subtask-discovered、permission-requested、question-requested、session-idle、session-error）
+
+**交互处理器 (`src/handler/interactive.ts`):**
+- `handlePermissionRequested`/`handleQuestionRequested`：构建交互卡片并发送到飞书
+- `handleCardAction`：解析按钮回调 value → 路由到 v2Client permission/question reply
+- `seenRequestIds` 防止重复发送交互卡片
+- `buildCallbackResponse`：返回 toast 即时反馈（3 秒约束）
+
+**CardKit 客户端 (`src/feishu/cardkit.ts`):**
+- `CardKitClient` 类：SDK thin wrapper，委托 `client.cardkit.v1.*` 方法
+- `createCard(schema)` → `client.cardkit.v1.card.create()`
+- `updateElement(cardId, elementId, content, sequence)` → `client.cardkit.v1.cardElement.content()`
+- `closeStreaming(cardId, sequence)` → `client.cardkit.v1.card.settings()`
+- Token 管理由 SDK Client 内置处理，无需自定义 TokenManager
+
+**流式卡片 (`src/feishu/streaming-card.ts`):**
+- `StreamingCard` 类：管理单个 AI 回复的流式卡片生命周期
+- `start()` → 创建卡片 + 发送 interactive 消息
+- `updateText(delta)` / `setToolStatus(callID, tool, state)` → 队列串行化更新
+- `close(finalMarkdown?)` → 清理 markdown + 截断 + 关闭流式模式
+- `destroy()` → 删除消息（abort 场景）
+
+**卡片构建器 (`src/feishu/card-builder.ts`):**
+- `buildPermissionCard(request)`：橙色头部 + patterns 列表 + 3 按钮（允许一次/始终允许/拒绝）
+- `buildQuestionCard(request)`：蓝色头部 + 问题文本 + 选项按钮
+
+**Markdown 工具 (`src/feishu/markdown.ts`):**
+- `cleanMarkdown(text)`：移除 HTML 标签、确保代码块闭合
+- `truncateMarkdown(text, limit)`：截断到 28KB 并添加提示后缀
 
 **历史摄入 (`src/feishu/history.ts`):**
 - 通过飞书 API 获取最近 50 条群消息
@@ -166,11 +220,13 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **消息发送器 (`src/feishu/sender.ts`):**
 - 通过飞书 API 发送、更新和删除消息
+- `sendCardMessage(client, chatId, cardId)` — 发送 CardKit 流式卡片
+- `sendInteractiveCard(client, chatId, card)` — 发送交互式卡片（权限/问答）
 
 **辅助模块：**
 - `src/feishu/dedup.ts` - 10 分钟消息去重窗口
 - `src/feishu/group-filter.ts` - @提及检测
-- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn）
+- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, ProcessedAction）
 
 ## 配置
 
@@ -234,7 +290,9 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 ## 依赖项
 
 **运行时:**
-- `@larksuiteoapi/node-sdk`: 飞书 WebSocket 网关和 API 客户端
+- `@larksuiteoapi/node-sdk`: 飞书 WebSocket 网关、REST API 客户端、内置 token 管理、CardKit 2.0 API
+- `zod`: 配置文件结构化验证
+- `https-proxy-agent`: WSClient 代理环境支持
 
 **Peer:**
 - `@opencode-ai/plugin`: OpenCode 插件接口（由 OpenCode 提供）

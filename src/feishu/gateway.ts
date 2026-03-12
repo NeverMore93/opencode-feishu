@@ -5,17 +5,22 @@ import * as Lark from "@larksuiteoapi/node-sdk"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import type { Agent } from "node:https"
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
+import { type CardActionData, buildCallbackResponse } from "../handler/interactive.js"
 import { isDuplicate } from "./dedup.js"
 import { describeMessageType } from "./content-extractor.js"
 import { isBotMentioned } from "./group-filter.js"
 
 export interface FeishuGatewayOptions {
   config: ResolvedConfig
+  /** 外部创建的 Lark Client（复用 token 管理和 HTTP 客户端） */
+  larkClient: InstanceType<typeof Lark.Client>
   /** bot 自身的 open_id（启动时通过 bot info API 获取），用于群聊 @提及检测 */
   botOpenId?: string
   onMessage: (ctx: FeishuMessageContext) => void | Promise<void>
   /** bot 被拉入群聊时触发（用于摄入历史上下文） */
   onBotAdded?: (chatId: string) => void | Promise<void>
+  /** 卡片按钮点击回调 */
+  onCardAction?: (action: CardActionData) => Promise<void>
   log: LogFn
 }
 
@@ -28,7 +33,7 @@ export interface FeishuGatewayResult {
  * 启动飞书 WebSocket 网关，返回 Client（供 sender 使用）和 stop 函数
  */
 export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGatewayResult {
-  const { config, botOpenId = "", onMessage, onBotAdded, log } = options
+  const { config, larkClient, botOpenId = "", onMessage, onBotAdded, onCardAction, log } = options
   const { appId, appSecret } = config
   const proxyUrl =
     process.env.HTTPS_PROXY ||
@@ -41,15 +46,6 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     wsAgent = new HttpsProxyAgent(proxyUrl)
     log("info", "WS proxy enabled", { proxy: proxyUrl })
   }
-
-  const sdkConfig = {
-    appId,
-    appSecret,
-    domain: Lark.Domain.Feishu,
-    appType: Lark.AppType.SelfBuild,
-  }
-
-  const client = new Lark.Client(sdkConfig)
 
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data: Record<string, unknown>) => {
@@ -141,6 +137,44 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         })
       }
     },
+    "card.action.trigger": async (data: Record<string, unknown>) => {
+      try {
+        // 类型化事件 payload（双路径兼容 SDK v1/v2 格式）
+        const evt = data as {
+          action?: { value?: unknown; tag?: string }
+          context?: { open_message_id?: string; open_chat_id?: string }
+          open_message_id?: string
+          open_chat_id?: string
+          operator?: { open_id?: string }
+        }
+        const action: CardActionData = {
+          actionValue: (typeof evt.action?.value === "object" && evt.action.value !== null)
+            ? JSON.stringify(evt.action.value)
+            : String(evt.action?.value ?? ""),
+          actionTag: String(evt.action?.tag ?? ""),
+          messageId: String(evt.context?.open_message_id ?? evt.open_message_id ?? ""),
+          chatId: String(evt.context?.open_chat_id ?? evt.open_chat_id ?? ""),
+          operatorId: String(evt.operator?.open_id ?? ""),
+        }
+
+        // fire-and-forget（必须 3s 内返回）
+        if (onCardAction) {
+          void onCardAction(action).catch((err) => {
+            log("error", "card action 处理失败", {
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+        }
+
+        // 即时返回 toast
+        return buildCallbackResponse(action)
+      } catch (err) {
+        log("error", "card.action.trigger 处理异常", {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return {}
+      }
+    },
   })
 
   const logLevelMap: Record<string, Lark.LoggerLevel> = {
@@ -153,7 +187,9 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   }
 
   const wsClient = new Lark.WSClient({
-    ...sdkConfig,
+    appId,
+    appSecret,
+    domain: Lark.Domain.Feishu,
     ...(wsAgent ? { agent: wsAgent } : {}),
     loggerLevel: logLevelMap[config.logLevel] ?? Lark.LoggerLevel.info,
     logger: {
@@ -174,5 +210,5 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     log("info", "飞书 WebSocket 网关已停止")
   }
 
-  return { client, stop }
+  return { client: larkClient, stop }
 }

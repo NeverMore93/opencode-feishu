@@ -70,3 +70,55 @@ export async function deleteMessage(
     // 尽力清理，忽略失败
   }
 }
+
+/**
+ * 发送交互式卡片消息（用于权限/问答卡片）
+ */
+export async function sendInteractiveCard(
+  client: InstanceType<typeof Lark.Client>,
+  chatId: string,
+  card: object,
+): Promise<FeishuSendResult> {
+  if (!chatId?.trim()) {
+    return { ok: false, error: "No chat_id provided" }
+  }
+  try {
+    const res = await client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId.trim(),
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      },
+    })
+    return { ok: true, messageId: res?.data?.message_id ?? "" }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * 发送 CardKit 2.0 卡片消息到飞书会话
+ */
+export async function sendCardMessage(
+  client: InstanceType<typeof Lark.Client>,
+  chatId: string,
+  cardId: string,
+): Promise<FeishuSendResult> {
+  if (!chatId?.trim()) {
+    return { ok: false, error: "No chat_id provided" };
+  }
+  try {
+    const res = await client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId.trim(),
+        msg_type: "interactive",
+        content: JSON.stringify({ type: "card_kit", data: { card_id: cardId } }),
+      },
+    });
+    return { ok: true, messageId: res?.data?.message_id ?? "" };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

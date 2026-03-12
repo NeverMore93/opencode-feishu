@@ -4,14 +4,15 @@
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
-import { request as httpsRequest } from "node:https"
-import { text } from "node:stream/consumers"
-import { HttpsProxyAgent } from "https-proxy-agent"
+import * as Lark from "@larksuiteoapi/node-sdk"
 import type { Plugin, Hooks } from "@opencode-ai/plugin"
-import type { FeishuPluginConfig, ResolvedConfig, LogFn } from "./types.js"
+import { z } from "zod"
+import { FeishuConfigSchema, type ResolvedConfig, type LogFn } from "./types.js"
+import { CardKitClient } from "./feishu/cardkit.js"
 import { startFeishuGateway, type FeishuGatewayResult } from "./feishu/gateway.js"
 import { enqueueMessage } from "./handler/session-queue.js"
 import { handleEvent } from "./handler/event.js"
+import { handleCardAction, type InteractiveDeps } from "./handler/interactive.js"
 import { ingestGroupHistory } from "./feishu/history.js"
 import { initDedup } from "./feishu/dedup.js"
 
@@ -19,22 +20,6 @@ const SERVICE_NAME = "opencode-feishu"
 const LOG_PREFIX = "[feishu]"
 const isDebug = !!process.env.FEISHU_DEBUG
 
-const DEFAULT_CONFIG: Omit<ResolvedConfig, "appId" | "appSecret"> = {
-  timeout: 120_000,
-  thinkingDelay: 2_500,
-  logLevel: "info",
-  maxHistoryMessages: 200,
-  pollInterval: 1_000,
-  stablePolls: 3,
-  dedupTtl: 10 * 60 * 1_000,
-  directory: "",
-  autoPrompt: {
-    enabled: false,
-    intervalSeconds: 30,
-    maxIterations: 10,
-    message: "请同步当前进度，如需帮助请说明",
-  },
-}
 
 export const FeishuPlugin: Plugin = async (ctx) => {
   const { client } = ctx
@@ -64,68 +49,71 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     )
   }
 
-  let feishuRaw: FeishuPluginConfig
+  let resolvedConfig: ResolvedConfig
   try {
-    feishuRaw = resolveEnvPlaceholders(
+    const raw = resolveEnvPlaceholders(
       JSON.parse(readFileSync(configPath, "utf-8")),
-    ) as FeishuPluginConfig
-  } catch (parseErr) {
-    throw new Error(`飞书配置文件格式错误：${configPath} 必须是合法的 JSON (${parseErr})`)
-  }
-
-  if (feishuRaw.directory !== undefined && typeof feishuRaw.directory !== "string") {
-    log("warn", `飞书配置警告：${configPath} 中的 'directory' 必须是字符串，已忽略`, {
-      actualType: typeof feishuRaw.directory,
-    })
-    feishuRaw.directory = undefined
-  }
-
-  if (!feishuRaw.appId || !feishuRaw.appSecret) {
-    throw new Error(
-      `飞书配置不完整：${configPath} 中必须包含 appId 和 appSecret`,
     )
-  }
-
-  const resolvedConfig: ResolvedConfig = {
-    appId: feishuRaw.appId,
-    appSecret: feishuRaw.appSecret,
-    timeout: feishuRaw.timeout ?? DEFAULT_CONFIG.timeout,
-    thinkingDelay: feishuRaw.thinkingDelay ?? DEFAULT_CONFIG.thinkingDelay,
-    logLevel: feishuRaw.logLevel ?? DEFAULT_CONFIG.logLevel,
-    maxHistoryMessages: feishuRaw.maxHistoryMessages ?? DEFAULT_CONFIG.maxHistoryMessages,
-    pollInterval: feishuRaw.pollInterval ?? DEFAULT_CONFIG.pollInterval,
-    stablePolls: feishuRaw.stablePolls ?? DEFAULT_CONFIG.stablePolls,
-    dedupTtl: feishuRaw.dedupTtl ?? DEFAULT_CONFIG.dedupTtl,
-    directory: expandDirectoryPath(feishuRaw.directory ?? ctx.directory ?? DEFAULT_CONFIG.directory),
-    autoPrompt: {
-      ...DEFAULT_CONFIG.autoPrompt,
-      ...(feishuRaw.autoPrompt ?? {}),
-    },
+    const parsed = FeishuConfigSchema.parse(raw)
+    // directory 后置处理：~ 展开和 ctx.directory fallback
+    resolvedConfig = {
+      ...parsed,
+      directory: expandDirectoryPath(parsed.directory ?? ctx.directory ?? ""),
+    }
+  } catch (e) {
+    if (e instanceof z.ZodError) {
+      const details = e.issues.map(i => `  - ${i.path.join(".")}: ${i.message}`).join("\n")
+      throw new Error(`${LOG_PREFIX} 配置验证失败:\n${details}`)
+    }
+    if (e instanceof SyntaxError) {
+      throw new Error(`飞书配置文件格式错误：${configPath} 必须是合法的 JSON (${e.message})`)
+    }
+    throw e
   }
 
   // 初始化去重缓存
   initDedup(resolvedConfig.dedupTtl)
 
-  // 获取 bot open_id（用于群聊 @提及检测）
-  const botOpenId = await fetchBotOpenId(resolvedConfig.appId, resolvedConfig.appSecret, log)
+  // 创建 Lark Client（SDK 内置 token 管理 + HTTP 客户端）
+  const larkClient = new Lark.Client({
+    appId: resolvedConfig.appId,
+    appSecret: resolvedConfig.appSecret,
+    domain: Lark.Domain.Feishu,
+    appType: Lark.AppType.SelfBuild,
+  })
+  const cardkit = new CardKitClient(larkClient, log)
 
-  // 启动飞书 WebSocket 网关
+  // 获取 bot open_id（用于群聊 @提及检测）
+  const botOpenId = await fetchBotOpenId(larkClient, log)
+
+  // TODO: Enable when @opencode-ai/sdk/v2 is available
+  const v2Client = undefined
+
+  // 启动飞书 WebSocket 网关（复用 larkClient）
   gateway = startFeishuGateway({
     config: resolvedConfig,
+    larkClient,
     botOpenId,
     onMessage: async (msgCtx) => {
       if (!msgCtx.content.trim() || !gateway) return
+      const interactiveDeps: InteractiveDeps = {
+        feishuClient: larkClient,
+        log,
+        v2Client,
+      }
       await enqueueMessage(msgCtx, {
         config: resolvedConfig,
         client,
-        feishuClient: gateway.client,
+        feishuClient: larkClient,
         log,
         directory: resolvedConfig.directory,
+        cardkit,
+        interactiveDeps,
       })
     },
     onBotAdded: (chatId) => {
       if (!gateway) return
-      ingestGroupHistory(gateway.client, client, chatId, {
+      ingestGroupHistory(larkClient, client, chatId, {
         maxMessages: resolvedConfig.maxHistoryMessages,
         log,
         directory: resolvedConfig.directory,
@@ -135,6 +123,15 @@ export const FeishuPlugin: Plugin = async (ctx) => {
           error: err instanceof Error ? err.message : String(err),
         })
       })
+    },
+    onCardAction: async (action) => {
+      if (!gateway) return
+      const interactiveDeps: InteractiveDeps = {
+        feishuClient: larkClient,
+        log,
+        v2Client,
+      }
+      await handleCardAction(action, interactiveDeps)
     },
     log,
   })
@@ -204,62 +201,20 @@ function resolveEnvPlaceholders(obj: unknown): unknown {
 }
 
 /**
- * Proxy-aware fetch. Bun's native fetch may ignore HTTPS_PROXY, so when a
- * proxy is configured we fall back to node:https + HttpsProxyAgent.
- * Signature mirrors global fetch — callers don't need to care about proxy.
- */
-function proxyFetch(url: string, init?: RequestInit): Promise<Response> {
-  const proxyUrl =
-    process.env.HTTPS_PROXY ||
-    process.env.HTTP_PROXY ||
-    process.env.ALL_PROXY ||
-    ""
-  if (!proxyUrl) return fetch(url, init)
-
-  const parsed = new URL(url)
-  return new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      {
-        hostname: parsed.hostname,
-        path: parsed.pathname + parsed.search,
-        method: init?.method ?? "GET",
-        headers: init?.headers as Record<string, string>,
-        agent: new HttpsProxyAgent(proxyUrl),
-      },
-      (res) => {
-        text(res).then((body) =>
-          resolve(new Response(body, { status: res.statusCode ?? 0 })),
-        ).catch(reject)
-      },
-    )
-    req.on("error", reject)
-    if (init?.body) req.write(init.body)
-    req.end()
-  })
-}
-
-/**
  * 获取 bot 自身的 open_id（用于群聊 @提及检测）
+ * 使用 Lark SDK client.request() 自动处理认证
  * 失败时直接抛出错误，阻止插件启动
  */
-async function fetchBotOpenId(appId: string, appSecret: string, log: LogFn): Promise<string> {
-  const tokenRes = await proxyFetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  })
-  const tokenData = await tokenRes.json() as { tenant_access_token?: string }
-  const token = tokenData?.tenant_access_token
-  if (!token) {
-    throw new Error("获取 tenant_access_token 失败，无法启动群聊 @提及检测")
-  }
-
-  const botRes = await proxyFetch("https://open.feishu.cn/open-apis/bot/v3/info", {
+async function fetchBotOpenId(
+  larkClient: InstanceType<typeof Lark.Client>,
+  log: LogFn,
+): Promise<string> {
+  // SDK 没有 /bot/v3/info 的语义方法，使用 client.request() 通用方法
+  const res = await larkClient.request<{ bot?: { open_id?: string } }>({
+    url: "https://open.feishu.cn/open-apis/bot/v3/info",
     method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
   })
-  const botData = await botRes.json() as { bot?: { open_id?: string } }
-  const openId = botData?.bot?.open_id
+  const openId = res?.bot?.open_id
   if (!openId) {
     throw new Error("Bot open_id 为空，无法启动群聊 @提及检测")
   }

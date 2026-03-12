@@ -1,3 +1,5 @@
+import { z } from "zod"
+
 /**
  * 飞书消息上下文（网关提取后传递给处理器）
  */
@@ -46,27 +48,31 @@ export interface FeishuPluginConfig {
   }
 }
 
+const AutoPromptSchema = z.object({
+  enabled: z.boolean().default(false),
+  intervalSeconds: z.number().int().positive().default(30),
+  maxIterations: z.number().int().positive().default(10),
+  message: z.string().min(1).default("请同步当前进度，如需帮助请说明"),
+})
+
+export const FeishuConfigSchema = z.object({
+  appId: z.string().min(1, "appId 不能为空"),
+  appSecret: z.string().min(1, "appSecret 不能为空"),
+  timeout: z.number().int().positive().default(120_000),
+  thinkingDelay: z.number().int().nonnegative().default(2_500),
+  logLevel: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
+  maxHistoryMessages: z.number().int().positive().default(200),
+  pollInterval: z.number().int().positive().default(1_000),
+  stablePolls: z.number().int().positive().default(3),
+  dedupTtl: z.number().int().positive().default(10 * 60 * 1_000),
+  directory: z.string().optional(),
+  autoPrompt: AutoPromptSchema.default(() => AutoPromptSchema.parse({})),
+})
+
 /**
- * 合并默认值后的完整配置
+ * 合并默认值后的完整配置（由 FeishuConfigSchema 推导）
  */
-export interface ResolvedConfig {
-  appId: string
-  appSecret: string
-  timeout: number
-  thinkingDelay: number
-  logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace"
-  maxHistoryMessages: number
-  pollInterval: number
-  stablePolls: number
-  dedupTtl: number
-  directory: string
-  autoPrompt: {
-    enabled: boolean
-    intervalSeconds: number
-    maxIterations: number
-    message: string
-  }
-}
+export type ResolvedConfig = z.infer<typeof FeishuConfigSchema> & { directory: string }
 
 /**
  * 插件日志函数签名
@@ -76,3 +82,23 @@ export type LogFn = (
   message: string,
   extra?: Record<string, unknown>,
 ) => void
+
+// ---- Phase 2: Event Bus Types ----
+
+// TODO: Replace with proper SDK v2 types once @opencode-ai/sdk/v2 exports them
+// PermissionRequest: { id, sessionID, permission, patterns, metadata }
+// QuestionRequest: { id, sessionID, questions: QuestionInfo[], tool? }
+export type PermissionRequest = Record<string, unknown>
+export type QuestionRequest = Record<string, unknown>
+
+/**
+ * 事件总线标准化 Action 类型
+ */
+export type ProcessedAction =
+  | { type: "text-updated"; sessionId: string; messageId?: string; delta?: string; fullText?: string }
+  | { type: "tool-state-changed"; sessionId: string; callID: string; tool: string; state: "running" | "completed" | "error"; title?: string }
+  | { type: "subtask-discovered"; sessionId: string; description: string; agent?: string }
+  | { type: "permission-requested"; sessionId: string; request: PermissionRequest }
+  | { type: "question-requested"; sessionId: string; request: QuestionRequest }
+  | { type: "session-idle"; sessionId: string }
+  | { type: "session-error"; sessionId: string; error: string; fields: string[] }
