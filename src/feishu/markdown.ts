@@ -5,6 +5,7 @@
 const MAX_CARD_BYTES = 28 * 1024 // 留 2KB 余量（飞书上限 ~30KB）
 const TRUNCATION_SUFFIX = "\n\n*内容过长，已截断*"
 const TRUNCATION_SUFFIX_BYTES = new TextEncoder().encode(TRUNCATION_SUFFIX).length
+const CODE_FENCE_BYTES = 4 // "\n```".length
 
 /** 只匹配明确的 HTML 标签（带属性或已知标签名），保护代码中的泛型如 Map<string, number> */
 const HTML_TAG_RE = /<\/?\w+(?:\s[^>]*)?\/?>/g
@@ -36,8 +37,8 @@ export function truncateMarkdown(text: string, limit = MAX_CARD_BYTES): string {
   const bytes = new TextEncoder().encode(text)
   if (bytes.length <= limit) return text
 
-  // 预留后缀占用的字节数
-  const effectiveLimit = limit - TRUNCATION_SUFFIX_BYTES
+  // 预留后缀 + 可能的代码块闭合占用的字节数
+  const effectiveLimit = limit - TRUNCATION_SUFFIX_BYTES - CODE_FENCE_BYTES
   if (effectiveLimit <= 0) return TRUNCATION_SUFFIX
 
   // 按字节截断，确保不截断 UTF-8 多字节字符

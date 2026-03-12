@@ -205,8 +205,9 @@ export async function handleEvent(
         const p = part as Record<string, unknown>
         const toolName = String(p.toolName ?? p.name ?? "unknown")
         const callID = String(p.toolCallID ?? p.id ?? "")
-        // tool part 的 state 字段可能存在；若无则根据是否有 error 判断
-        const rawState = String(p.state ?? "running")
+        // tool part 的 state 字段可能存在；若无则根据 error 字段推断
+        const hasError = p.error !== undefined && p.error !== null
+        const rawState = p.state != null ? String(p.state) : (hasError ? "error" : "running")
         const toolState = (rawState === "completed" || rawState === "error") ? rawState : "running" as const
 
         if (partSessionId) {

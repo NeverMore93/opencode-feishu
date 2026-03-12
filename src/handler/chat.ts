@@ -131,6 +131,10 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       log("warn", "CardKit 创建失败，回退纯文本", {
         error: err instanceof Error ? err.message : String(err),
       })
+      // 清理可能部分创建的卡片资源
+      if (streamingCard) {
+        await streamingCard.destroy().catch(() => {})
+      }
       streamingCard = undefined
     }
   }
