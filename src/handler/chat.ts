@@ -179,9 +179,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     await runAutoPromptLoop(session.id)
   } catch (err) {
-    // AbortError = 被新消息中断，静默退出
+    // AbortError = 被新消息中断，清理占位消息后静默退出
     if (err instanceof Error && err.name === "AbortError") {
       log("info", "处理被中断", { sessionKey, sessionId: session.id })
+      if (placeholderId) {
+        await sender.deleteMessage(feishuClient, placeholderId).catch(() => {})
+      }
       return
     }
 
