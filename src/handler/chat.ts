@@ -263,6 +263,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           // AbortError during recovery = interrupted
           if (recoveryErr instanceof Error && recoveryErr.name === "AbortError") {
             log("info", "模型恢复被中断", { sessionKey })
+            if (placeholderId) {
+              await sender.deleteMessage(feishuClient, placeholderId).catch(() => {})
+            }
             return
           }
 

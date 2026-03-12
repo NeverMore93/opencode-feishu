@@ -16,6 +16,7 @@ import { ingestGroupHistory } from "./feishu/history.js"
 import { initDedup } from "./feishu/dedup.js"
 
 const SERVICE_NAME = "opencode-feishu"
+const LOG_PREFIX = "[feishu]"
 const isDebug = !!process.env.FEISHU_DEBUG
 
 const DEFAULT_CONFIG: Omit<ResolvedConfig, "appId" | "appSecret"> = {
@@ -40,7 +41,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   let gateway: FeishuGatewayResult | null = null
 
   const log: LogFn = (level, message, extra) => {
-    const prefixed = `[feishu] ${message}`
+    const prefixed = `${LOG_PREFIX} ${message}`
     if (isDebug) {
       console.error(JSON.stringify({ ts: new Date().toISOString(), service: SERVICE_NAME, level, message: prefixed, ...extra }))
     }
