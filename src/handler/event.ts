@@ -4,7 +4,7 @@
 import type { Event } from "@opencode-ai/sdk"
 
 import * as sender from "../feishu/sender.js"
-import type { LogFn } from "../types.js"
+import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import { emit } from "./action-bus.js"
 
@@ -290,14 +290,14 @@ export async function handleEvent(
         emit(evtSessionId, {
           type: "permission-requested",
           sessionId: evtSessionId,
-          request: evtProps as any,
+          request: evtProps as PermissionRequest,
         })
         deps.log("info", "permission.asked 事件已分发", { sessionId: evtSessionId })
       } else if (evtType === "question.asked" && evtSessionId) {
         emit(evtSessionId, {
           type: "question-requested",
           sessionId: evtSessionId,
-          request: evtProps as any,
+          request: evtProps as QuestionRequest,
         })
         deps.log("info", "question.asked 事件已分发", { sessionId: evtSessionId })
       } else if (evtType === "session.idle" && evtSessionId) {

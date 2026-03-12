@@ -26,9 +26,14 @@ export function subscribe(
   return () => {
     if (removed) return
     removed = true
-    subs!.delete(cb)
-    if (subs!.size === 0) {
-      subscribers.delete(sessionId)
+    // 从当前 sessionId 的订阅集合中移除，使用 subscribers.get() 获取最新引用
+    // 避免闭包捕获的旧 Set 引用与新 Set 不一致
+    const current = subscribers.get(sessionId)
+    if (current) {
+      current.delete(cb)
+      if (current.size === 0) {
+        subscribers.delete(sessionId)
+      }
     }
   }
 }

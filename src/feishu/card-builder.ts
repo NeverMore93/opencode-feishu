@@ -86,7 +86,7 @@ export function buildQuestionCard(request: QuestionRequest): object {
     value: JSON.stringify({
       action: "question_reply",
       requestId,
-      answers: [[String(opt.label ?? opt.value ?? "")]],
+      answers: [[String(opt.value ?? opt.label ?? "")]],
     }),
   }))
 
