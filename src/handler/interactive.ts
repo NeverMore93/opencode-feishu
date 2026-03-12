@@ -84,7 +84,11 @@ export async function handleCardAction(
 ): Promise<void> {
   if (!action.actionValue || !deps.v2Client) return
 
-  let value: { action?: string; requestId?: string; reply?: string; answers?: string[][] }
+  type PermissionReplyValue = { action: "permission_reply"; requestId: string; reply: string }
+  type QuestionReplyValue = { action: "question_reply"; requestId: string; answers: string[][] }
+  type ActionValue = PermissionReplyValue | QuestionReplyValue | { action?: string; requestId?: string }
+
+  let value: ActionValue
   try {
     value = JSON.parse(action.actionValue)
   } catch {
@@ -95,12 +99,12 @@ export async function handleCardAction(
   if (!requestId) return
 
   try {
-    if (value.action === "permission_reply" && value.reply) {
+    if (value.action === "permission_reply" && "reply" in value) {
       await deps.v2Client.permission.reply({
         path: { requestID: requestId },
         body: { reply: value.reply },
       })
-    } else if (value.action === "question_reply" && value.answers) {
+    } else if (value.action === "question_reply" && "answers" in value) {
       await deps.v2Client.question.reply({
         path: { requestID: requestId },
         body: { answers: value.answers },

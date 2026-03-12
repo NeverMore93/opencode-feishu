@@ -3,6 +3,13 @@
  */
 import type { PermissionRequest, QuestionRequest } from "../types.js"
 
+/** 问题信息结构（从 QuestionRequest.questions 数组中提取） */
+type QuestionInfo = {
+  question?: string
+  header?: string
+  options?: Array<{ label?: string; value?: string }>
+}
+
 /**
  * 构建权限审批卡片
  */
@@ -67,7 +74,7 @@ export function buildQuestionCard(request: QuestionRequest): object {
   const requestId = String(request.id ?? "")
 
   // 取第一个问题（通常只有一个）
-  const q = questions[0] as { question?: string; header?: string; options?: Array<{ label?: string; value?: string }> } | undefined
+  const q = questions[0] as QuestionInfo | undefined
   const header = String(q?.header ?? "AI 提问")
   const questionText = String(q?.question ?? "请选择")
   const options = Array.isArray(q?.options) ? q.options : []
