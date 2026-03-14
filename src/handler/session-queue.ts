@@ -6,7 +6,7 @@
  * - 静默转发：完全绕过队列
  */
 import type { FeishuMessageContext } from "../types.js"
-import { handleChat, type ChatDeps } from "./chat.js"
+import { handleChat, runOneAutoPromptIteration, abortableSleep, type ChatDeps, type AutoPromptContext } from "./chat.js"
 import { buildSessionKey, getCachedSession } from "../session.js"
 
 interface QueuedMessage {
@@ -41,6 +41,10 @@ function cleanupStateIfIdle(sessionKey: string, state: QueueState): void {
   if (!state.processing && state.queue.length === 0) {
     states.delete(sessionKey)
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 /**
@@ -92,7 +96,19 @@ async function handleP2PMessage(
   state.controller = controller
   state.processing = true
 
-  const task = processMessage(ctx, deps, controller.signal)
+  const task = (async () => {
+    const apCtx = await processMessage(ctx, deps, controller.signal)
+    if (apCtx) {
+      await runP2PAutoPrompt(apCtx, controller.signal)
+    }
+  })()
+    .catch((err) => {
+      if (err instanceof Error && err.name === "AbortError") return
+      deps.log("error", "P2P 消息或自动提示处理失败", {
+        sessionKey,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
     .finally(() => {
       state.processing = false
       state.controller = null
@@ -102,6 +118,38 @@ async function handleP2PMessage(
 
   state.currentTask = task
   await task
+}
+
+/**
+ * P2P 自动提示循环：在用户无新消息时持续发送提示，直到检测到空闲或达到上限
+ */
+async function runP2PAutoPrompt(
+  apCtx: AutoPromptContext,
+  signal: AbortSignal,
+): Promise<void> {
+  const { autoPrompt } = apCtx.deps.config
+  if (!autoPrompt.enabled) return
+  let idleCount = 0
+
+  for (let i = 0; i < autoPrompt.maxIterations; i++) {
+    await abortableSleep(autoPrompt.intervalSeconds * 1000, signal)
+    const result = await runOneAutoPromptIteration(apCtx, i + 1, signal)
+    if (result.isIdle) {
+      idleCount++
+      if (idleCount >= autoPrompt.idleThreshold) {
+        apCtx.deps.log("info", "P2P 自动提示循环结束（检测到空闲）", {
+          sessionKey: apCtx.sessionKey, iteration: i + 1, idleCount,
+        })
+        return
+      }
+    } else {
+      idleCount = 0
+    }
+  }
+
+  apCtx.deps.log("info", "P2P 自动提示循环结束（达到最大次数）", {
+    sessionKey: apCtx.sessionKey,
+  })
 }
 
 /**
@@ -122,28 +170,93 @@ async function handleGroupMessage(
 }
 
 /**
- * 串行消费队列中的所有消息
+ * 串行消费队列中的所有消息，队列耗尽后进入空闲 auto-prompt 阶段
  */
 async function drainLoop(sessionKey: string, state: QueueState): Promise<void> {
   state.processing = true
+  let autoPromptCtx: AutoPromptContext | undefined
+  let idleCount = 0
+  let autoPromptIteration = 0
 
   try {
-    while (state.queue.length > 0) {
-      const item = state.queue.shift()
-      if (!item) break
+    while (true) {
+      // Phase 1: 用户消息优先
+      if (state.queue.length > 0) {
+        const item = state.queue.shift()!
+        const controller = new AbortController()
+        state.controller = controller
 
-      const controller = new AbortController()
-      state.controller = controller
+        try {
+          autoPromptCtx = await processMessage(item.ctx, item.deps, controller.signal)
+          idleCount = 0
+          autoPromptIteration = 0
+        } catch (err) {
+          item.deps.log("error", "群聊队列消息处理失败", {
+            sessionKey,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        } finally {
+          state.controller = null
+        }
+        continue
+      }
 
+      // Phase 2: 队列空，尝试空闲 auto-prompt
+      if (!autoPromptCtx) break
+      const { autoPrompt } = autoPromptCtx.deps.config
+      if (!autoPrompt.enabled) break
+      if (autoPromptIteration >= autoPrompt.maxIterations) {
+        autoPromptCtx.deps.log("info", "自动提示循环结束（达到最大次数）", { sessionKey })
+        break
+      }
+
+      // 可中断 sleep：拆成 1 秒粒度，每秒检查队列
+      const intervalSeconds = autoPrompt.intervalSeconds
+      let interrupted = false
+      for (let s = 0; s < intervalSeconds; s++) {
+        await sleep(1000)
+        if (state.queue.length > 0) {
+          interrupted = true
+          break
+        }
+      }
+      if (interrupted) continue
+
+      // 执行一轮 auto-prompt（可被新入队消息打断）
+      const autoPromptController = new AbortController()
+      const monitor = setInterval(() => {
+        if (state.queue.length > 0) autoPromptController.abort()
+      }, 200)
       try {
-        await processMessage(item.ctx, item.deps, controller.signal)
+        const result = await runOneAutoPromptIteration(
+          autoPromptCtx,
+          autoPromptIteration + 1,
+          autoPromptController.signal,
+        )
+        autoPromptIteration++
+
+        if (result.isIdle) {
+          idleCount++
+          if (idleCount >= autoPrompt.idleThreshold) {
+            autoPromptCtx.deps.log("info", "自动提示循环结束（检测到空闲）", {
+              sessionKey, iteration: autoPromptIteration, idleCount,
+            })
+            break
+          }
+        } else {
+          idleCount = 0
+        }
       } catch (err) {
-        item.deps.log("error", "群聊队列消息处理失败", {
+        if (err instanceof Error && err.name === "AbortError") {
+          continue
+        }
+        autoPromptCtx.deps.log("error", "自动提示迭代异常", {
           sessionKey,
           error: err instanceof Error ? err.message : String(err),
         })
+        break
       } finally {
-        state.controller = null
+        clearInterval(monitor)
       }
     }
   } finally {
@@ -156,11 +269,9 @@ async function drainLoop(sessionKey: string, state: QueueState): Promise<void> {
  * 处理单条消息，将 signal 传递给 handleChat
  */
 async function processMessage(
-  ctx: FeishuMessageContext,
-  deps: ChatDeps,
-  signal: AbortSignal,
-): Promise<void> {
-  await handleChat(ctx, deps, signal)
+  ctx: FeishuMessageContext, deps: ChatDeps, signal: AbortSignal,
+): Promise<AutoPromptContext | undefined> {
+  return handleChat(ctx, deps, signal)
 }
 
 /**

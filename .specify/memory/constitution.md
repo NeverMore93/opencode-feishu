@@ -43,7 +43,7 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 可选配置：`timeout`、`thinkingDelay`、`logLevel`、`maxHistoryMessages`、
   `pollInterval`、`stablePolls`、`dedupTtl`、`directory`
 - 自动提示配置：`autoPrompt` 对象（`enabled`、`intervalSeconds`、
-  `maxIterations`、`message`），默认关闭
+  `maxIterations`、`message`、`idleThreshold`、`idleMaxLength`），默认关闭
 
 ### 五、消息处理
 - 纯中继模式：所有消息原样转发给 OpenCode
@@ -91,9 +91,10 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 
 ### 十一、自动提示
 响应完成后自动发送"继续"推动 OpenCode 持续工作，实现主动式交互。
-- 完成检测哲学：不做模式匹配或关键词扫描，让 AI 自己判断任务是否完成
+- 空闲检测：通过简单的文本长度 + 关键词匹配（`isIdleResponse`）识别空闲响应，
+  连续空闲次数达到 `idleThreshold` 时自动退出循环
 - 安全兜底：`maxIterations` 限制防止无限循环
-- 用户优先：用户发送新消息时立即中断自动提示循环
+- 用户优先：用户发送新消息时立即中断自动提示循环（P2P 通过 abort，群聊通过队列检查）
 - 仅在主动回复模式（shouldReply）下触发，静默监听不触发
 - 各会话独立计数，互不干扰
 

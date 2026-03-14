@@ -45,6 +45,8 @@ export interface FeishuPluginConfig {
     intervalSeconds?: number
     maxIterations?: number
     message?: string
+    idleThreshold?: number
+    idleMaxLength?: number
   }
 }
 
@@ -53,6 +55,8 @@ const AutoPromptSchema = z.object({
   intervalSeconds: z.number().int().positive().default(30),
   maxIterations: z.number().int().positive().default(10),
   message: z.string().min(1).default("请同步当前进度，如需帮助请说明"),
+  idleThreshold: z.number().int().min(1).default(2),
+  idleMaxLength: z.number().int().min(10).default(50),
 })
 
 export const FeishuConfigSchema = z.object({
