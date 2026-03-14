@@ -502,17 +502,18 @@ async function replyOrUpdate(
   }
 }
 
+const idlePatterns = [
+  /^(无|没有)(任务|变化|进行中)/,
+  /空闲|闲置|等待(指令|中|新|你)/,
+  /随时可(开始|开始新)/,
+  /等你指令/,
+]
+
 /**
  * 检测 AI 响应文本是否表示空闲状态（无进行中任务）
  */
 export function isIdleResponse(text: string, maxLength: number = 50): boolean {
   if (text.length >= maxLength) return false
-  const idlePatterns = [
-    /^(无|没有)(任务|变化|进行中)/,
-    /空闲|闲置|等待(指令|中|新|你)/,
-    /随时可(开始|开始新)/,
-    /等你指令/,
-  ]
   return idlePatterns.some(p => p.test(text))
 }
 

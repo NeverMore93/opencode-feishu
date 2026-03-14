@@ -99,7 +99,7 @@ async function handleP2PMessage(
   const task = (async () => {
     const apCtx = await processMessage(ctx, deps, controller.signal)
     if (apCtx) {
-      await runP2PAutoPrompt(apCtx, state, controller.signal)
+      await runP2PAutoPrompt(apCtx, controller.signal)
     }
   })()
     .catch((err) => {
@@ -122,7 +122,6 @@ async function handleP2PMessage(
  */
 async function runP2PAutoPrompt(
   apCtx: AutoPromptContext,
-  state: QueueState,
   signal: AbortSignal,
 ): Promise<void> {
   const { autoPrompt } = apCtx.deps.config
