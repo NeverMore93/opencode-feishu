@@ -19,8 +19,12 @@ import type { CardKitClient } from "../feishu/cardkit.js"
 import { StreamingCard } from "../feishu/streaming-card.js"
 import { handlePermissionRequested, handleQuestionRequested, type InteractiveDeps } from "./interactive.js"
 
-/** 每个会话的活跃自动提示循环，用于用户介入时中断 */
-const activeAutoPrompts = new Map<string, AbortController>()
+export interface AutoPromptContext {
+  readonly sessionId: string
+  readonly sessionKey: string
+  readonly chatId: string
+  readonly deps: ChatDeps
+}
 
 export interface ChatDeps {
   config: ResolvedConfig
@@ -60,28 +64,20 @@ async function abortCleanup(
   }
 }
 
-export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<void> {
+export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<AutoPromptContext | undefined> {
   const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId } = ctx
-  if (!content.trim() && messageType === "text") return
+  if (!content.trim() && messageType === "text") return undefined
 
   const { config, client, feishuClient, log, directory } = deps
   const query = directory ? { directory } : undefined
 
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
 
-  // 用户发新消息时中断该会话的自动提示循环
-  const existing = activeAutoPrompts.get(sessionKey)
-  if (existing) {
-    existing.abort()
-    activeAutoPrompts.delete(sessionKey)
-    log("info", "用户介入，自动提示已中断", { sessionKey: sessionKey })
-  }
-
   const session = await getOrCreateSession(client, sessionKey, directory)
 
   // 提取消息内容为 OpenCode parts
   const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log)
-  if (!parts.length) return
+  if (!parts.length) return undefined
 
   log("info", "收到用户消息", {
     sessionKey,
@@ -109,7 +105,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
         error: err instanceof Error ? err.message : String(err),
       })
     }
-    return
+    return undefined
   }
 
   const timeout = config.timeout
@@ -159,54 +155,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           }
         }, thinkingDelay)
       : null
-
-  /** 自动提示循环：响应完成后自动发送"继续"推动 OpenCode 持续工作 */
-  async function runAutoPromptLoop(activeId: string): Promise<void> {
-    const { autoPrompt } = config
-    if (!autoPrompt.enabled || !shouldReply) return
-
-    const ac = new AbortController()
-    activeAutoPrompts.set(sessionKey, ac)
-    log("info", "启动自动提示循环", { sessionKey, maxIterations: autoPrompt.maxIterations })
-
-    try {
-      for (let i = 0; i < autoPrompt.maxIterations; i++) {
-        await abortableSleep(autoPrompt.intervalSeconds * 1000, ac.signal)
-
-        log("info", "发送自动提示", { sessionKey, iteration: i + 1 })
-
-        clearSessionError(activeId)
-        await client.session.prompt({
-          path: { id: activeId },
-          query,
-          body: { parts: [{ type: "text", text: autoPrompt.message }] },
-        })
-
-        const text = await pollForResponse(client, activeId, { timeout, pollInterval, stablePolls, query, signal: ac.signal })
-        if (text) {
-          log("info", "自动提示响应", {
-            sessionKey,
-            iteration: i + 1,
-            output: text,
-          })
-          await sender.sendTextMessage(feishuClient, chatId, text)
-        }
-      }
-
-      log("info", "自动提示循环结束（达到最大次数）", { sessionKey: sessionKey })
-    } catch (loopErr) {
-      if ((loopErr as Error).name === "AbortError") {
-        log("info", "自动提示循环被中断", { sessionKey: sessionKey })
-      } else {
-        log("error", "自动提示循环异常", {
-          sessionKey,
-          error: loopErr instanceof Error ? loopErr.message : String(loopErr),
-        })
-      }
-    } finally {
-      activeAutoPrompts.delete(sessionKey)
-    }
-  }
 
   // 订阅 action-bus 更新流式卡片 + 交互式卡片分发
   let cardUnsub: (() => void) | undefined
@@ -264,13 +212,16 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
-    await runAutoPromptLoop(session.id)
+    if (config.autoPrompt.enabled && shouldReply) {
+      return { sessionId: session.id, sessionKey, chatId, deps }
+    }
+    return undefined
   } catch (err) {
     // AbortError = 被新消息中断，清理占位消息后静默退出
     if (err instanceof Error && err.name === "AbortError") {
       log("info", "处理被中断", { sessionKey, sessionId: session.id })
       await abortCleanup(streamingCard, feishuClient, placeholderId)
-      return
+      return undefined
     }
 
     // pollForResponse 检测到 SSE 错误时直接携带 sessionError
@@ -341,15 +292,17 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
               attempt: attempts + 1,
             })
 
-            await runAutoPromptLoop(session.id)
-            return
+            if (config.autoPrompt.enabled && shouldReply) {
+              return { sessionId: session.id, sessionKey, chatId, deps }
+            }
+            return undefined
           }
         } catch (recoveryErr) {
           // AbortError during recovery = interrupted
           if (recoveryErr instanceof Error && recoveryErr.name === "AbortError") {
             log("info", "模型恢复被中断", { sessionKey })
             await abortCleanup(streamingCard, feishuClient, placeholderId)
-            return
+            return undefined
           }
 
           const errMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
@@ -550,9 +503,59 @@ async function replyOrUpdate(
 }
 
 /**
+ * 检测 AI 响应文本是否表示空闲状态（无进行中任务）
+ */
+export function isIdleResponse(text: string, maxLength: number = 50): boolean {
+  if (text.length >= maxLength) return false
+  const idlePatterns = [
+    /^(无|没有)(任务|变化|进行中)/,
+    /空闲|闲置|等待(指令|中|新|你)/,
+    /随时可(开始|开始新)/,
+    /等你指令/,
+  ]
+  return idlePatterns.some(p => p.test(text))
+}
+
+/**
+ * 执行一轮自动提示迭代：发送提示、等待响应、发送到飞书（空闲响应不发送）
+ */
+export async function runOneAutoPromptIteration(
+  apCtx: AutoPromptContext,
+  iteration: number,
+): Promise<{ text: string | null; isIdle: boolean }> {
+  const { sessionId, chatId, deps } = apCtx
+  const { config, client, feishuClient, log, directory } = deps
+  const query = directory ? { directory } : undefined
+  const { autoPrompt, timeout, pollInterval, stablePolls } = config
+
+  log("info", "发送自动提示", { sessionKey: apCtx.sessionKey, iteration })
+
+  clearSessionError(sessionId)
+  await client.session.promptAsync({
+    path: { id: sessionId },
+    query,
+    body: { parts: [{ type: "text", text: autoPrompt.message }] },
+  })
+
+  const text = await pollForResponse(client, sessionId, {
+    timeout, pollInterval, stablePolls, query,
+  })
+
+  if (!text) return { text: null, isIdle: false }
+
+  const idle = isIdleResponse(text, autoPrompt.idleMaxLength ?? 50)
+  if (!idle) {
+    log("info", "自动提示响应", { sessionKey: apCtx.sessionKey, iteration, output: text })
+    await sender.sendTextMessage(feishuClient, chatId, text)
+  }
+
+  return { text, isIdle: idle }
+}
+
+/**
  * 可被 AbortSignal 中断的 sleep
  */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(new DOMException("Aborted", "AbortError"))

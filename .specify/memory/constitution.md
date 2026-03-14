@@ -43,7 +43,7 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 可选配置：`timeout`、`thinkingDelay`、`logLevel`、`maxHistoryMessages`、
   `pollInterval`、`stablePolls`、`dedupTtl`、`directory`
 - 自动提示配置：`autoPrompt` 对象（`enabled`、`intervalSeconds`、
-  `maxIterations`、`message`），默认关闭
+  `maxIterations`、`message`、`idleThreshold`、`idleMaxLength`），默认关闭
 
 ### 五、消息处理
 - 纯中继模式：所有消息原样转发给 OpenCode
