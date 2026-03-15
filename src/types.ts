@@ -52,8 +52,8 @@ export interface FeishuPluginConfig {
 
 const AutoPromptSchema = z.object({
   enabled: z.boolean().default(false),
-  intervalSeconds: z.number().int().positive().default(30),
-  maxIterations: z.number().int().positive().default(10),
+  intervalSeconds: z.number().int().positive().max(300).default(30),
+  maxIterations: z.number().int().positive().max(100).default(10),
   message: z.string().min(1).default("请同步当前进度，如需帮助请说明"),
   idleThreshold: z.number().int().min(1).default(2),
   idleMaxLength: z.number().int().min(10).default(50),
@@ -62,10 +62,10 @@ const AutoPromptSchema = z.object({
 export const FeishuConfigSchema = z.object({
   appId: z.string().min(1, "appId 不能为空"),
   appSecret: z.string().min(1, "appSecret 不能为空"),
-  timeout: z.number().int().positive().default(120_000),
+  timeout: z.number().int().positive().max(600_000).default(120_000),
   thinkingDelay: z.number().int().nonnegative().default(2_500),
   logLevel: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
-  maxHistoryMessages: z.number().int().positive().default(200),
+  maxHistoryMessages: z.number().int().positive().max(500).default(200),
   pollInterval: z.number().int().positive().default(1_000),
   stablePolls: z.number().int().positive().default(3),
   dedupTtl: z.number().int().positive().default(10 * 60 * 1_000),
@@ -87,22 +87,6 @@ export type LogFn = (
   extra?: Record<string, unknown>,
 ) => void
 
-// ---- Phase 2: Event Bus Types ----
-
 // TODO: Replace with proper SDK v2 types once @opencode-ai/sdk/v2 exports them
-// PermissionRequest: { id, sessionID, permission, patterns, metadata }
-// QuestionRequest: { id, sessionID, questions: QuestionInfo[], tool? }
 export type PermissionRequest = Record<string, unknown>
 export type QuestionRequest = Record<string, unknown>
-
-/**
- * 事件总线标准化 Action 类型
- */
-export type ProcessedAction =
-  | { type: "text-updated"; sessionId: string; messageId?: string; delta?: string; fullText?: string }
-  | { type: "tool-state-changed"; sessionId: string; callID: string; tool: string; state: "running" | "completed" | "error"; title?: string }
-  | { type: "subtask-discovered"; sessionId: string; description: string; agent?: string }
-  | { type: "permission-requested"; sessionId: string; request: PermissionRequest }
-  | { type: "question-requested"; sessionId: string; request: QuestionRequest }
-  | { type: "session-idle"; sessionId: string }
-  | { type: "session-error"; sessionId: string; error: string; fields: string[] }

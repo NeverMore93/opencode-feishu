@@ -1,7 +1,19 @@
 /**
  * Action Bus: per-session 事件订阅/发布
  */
-import type { ProcessedAction } from "../types.js"
+import type { PermissionRequest, QuestionRequest } from "../types.js"
+
+/**
+ * 事件总线标准化 Action 类型
+ */
+export type ProcessedAction =
+  | { type: "text-updated"; sessionId: string; messageId?: string; delta?: string; fullText?: string }
+  | { type: "tool-state-changed"; sessionId: string; callID: string; tool: string; state: "running" | "completed" | "error"; title?: string }
+  | { type: "subtask-discovered"; sessionId: string; description: string; agent?: string }
+  | { type: "permission-requested"; sessionId: string; request: PermissionRequest }
+  | { type: "question-requested"; sessionId: string; request: QuestionRequest }
+  | { type: "session-idle"; sessionId: string }
+  | { type: "session-error"; sessionId: string; error: string; fields: string[] }
 
 type ActionCallback = (action: ProcessedAction) => void | Promise<void>
 

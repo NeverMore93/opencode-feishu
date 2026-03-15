@@ -5,6 +5,7 @@ import type { PermissionRequest, QuestionRequest, LogFn } from "../types.js"
 import { buildPermissionCard, buildQuestionCard } from "../feishu/card-builder.js"
 import * as sender from "../feishu/sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
+import { TtlMap } from "../utils/ttl-map.js"
 
 export interface InteractiveDeps {
   feishuClient: InstanceType<typeof Lark.Client>
@@ -19,17 +20,11 @@ export interface InteractiveDeps {
 }
 
 /** 去重：同一 requestId 只发一张卡片（TTL 防止内存泄漏） */
-const SEEN_TTL_MS = 10 * 60 * 1_000 // 10 分钟
-const seenRequestIds = new Map<string, number>()
+const seenIds = new TtlMap<true>(10 * 60 * 1_000)
 
 function markSeen(requestId: string): boolean {
-  const now = Date.now()
-  // 清理过期条目
-  for (const [id, ts] of seenRequestIds) {
-    if (now - ts > SEEN_TTL_MS) seenRequestIds.delete(id)
-  }
-  if (seenRequestIds.has(requestId)) return false
-  seenRequestIds.set(requestId, now)
+  if (seenIds.has(requestId)) return false
+  seenIds.set(requestId, true)
   return true
 }
 

@@ -7,6 +7,7 @@ import * as sender from "../feishu/sender.js"
 import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import { emit } from "./action-bus.js"
+import { TtlMap } from "../utils/ttl-map.js"
 
 export interface PendingReplyPayload {
   chatId: string
@@ -30,26 +31,14 @@ export interface CachedSessionError {
   fields: string[]   // 所有提取的错误文本字段（用于模式匹配）
 }
 
-const sessionErrors = new Map<string, CachedSessionError>()
-const sessionErrorTimeouts = new Map<string, NodeJS.Timeout>()
-const SESSION_ERROR_TTL_MS = 30_000
+const sessionErrors = new TtlMap<CachedSessionError>(30_000)
 
 /** 重试次数限制：防止模型不兼容时无限重试循环 */
-const retryAttempts = new Map<string, number>()
-const retryAttemptTimeouts = new Map<string, NodeJS.Timeout>()
+const retryAttempts = new TtlMap<number>(3_600_000)
 export const MAX_RETRY_ATTEMPTS = 2
-const RETRY_ATTEMPTS_TTL_MS = 3_600_000
 
-/**
- * 重置指定 sessionKey 的重试计数（成功 prompt 后调用）
- */
 export function clearRetryAttempts(sessionKey: string): void {
   retryAttempts.delete(sessionKey)
-  const timer = retryAttemptTimeouts.get(sessionKey)
-  if (timer) {
-    clearTimeout(timer)
-    retryAttemptTimeouts.delete(sessionKey)
-  }
 }
 
 export function getRetryAttempts(sessionKey: string): number {
@@ -58,13 +47,6 @@ export function getRetryAttempts(sessionKey: string): number {
 
 export function setRetryAttempts(sessionKey: string, count: number): void {
   retryAttempts.set(sessionKey, count)
-  const existing = retryAttemptTimeouts.get(sessionKey)
-  if (existing) clearTimeout(existing)
-  const timeoutId = setTimeout(() => {
-    retryAttempts.delete(sessionKey)
-    retryAttemptTimeouts.delete(sessionKey)
-  }, RETRY_ATTEMPTS_TTL_MS)
-  retryAttemptTimeouts.set(sessionKey, timeoutId)
 }
 
 export function getSessionError(sessionId: string): CachedSessionError | undefined {
@@ -72,25 +54,7 @@ export function getSessionError(sessionId: string): CachedSessionError | undefin
 }
 
 export function clearSessionError(sessionId: string): void {
-  const timer = sessionErrorTimeouts.get(sessionId)
-  if (timer) {
-    clearTimeout(timer)
-    sessionErrorTimeouts.delete(sessionId)
-  }
   sessionErrors.delete(sessionId)
-}
-
-function setSessionError(sessionId: string, message: string, fields: string[]): void {
-  const existing = sessionErrorTimeouts.get(sessionId)
-  if (existing) {
-    clearTimeout(existing)
-  }
-  sessionErrors.set(sessionId, { message, fields })
-  const timeoutId = setTimeout(() => {
-    sessionErrors.delete(sessionId)
-    sessionErrorTimeouts.delete(sessionId)
-  }, SESSION_ERROR_TTL_MS)
-  sessionErrorTimeouts.set(sessionId, timeoutId)
 }
 
 export function registerPending(
@@ -175,141 +139,151 @@ export async function handleEvent(
   switch (event.type) {
     case "message.part.updated": {
       const part = event.properties.part
-      if (!part) break
-
-      const sessionId = part.sessionID
-      if (!sessionId) break
-
-      const payload = pendingBySession.get(sessionId)
+      if (!part?.sessionID) break
+      const payload = pendingBySession.get(part.sessionID)
       if (!payload) break
-
-      // messageID 过滤：首个事件锁定 messageID，后续只接受匹配的事件
-      const messageId = part.messageID as string | undefined
-      if (messageId) {
-        if (!payload.expectedMessageId) {
-          // 锁定首个收到的 messageID
-          payload.expectedMessageId = messageId
-        } else if (payload.expectedMessageId !== messageId) {
-          // 不匹配当前锁定的 messageID，丢弃事件
-          break
-        }
-      } else if (payload.expectedMessageId) {
-        // 已锁定 messageID 但当前事件缺少 messageID，丢弃防止污染
-        break
-      }
-
-      const partSessionId = part.sessionID as string
-
-      // Emit tool-state-changed for tool parts (skip text-updated — tool parts have no text content)
-      if (part.type === "tool") {
-        const p = part as Record<string, unknown>
-        const toolName = String(p.toolName ?? p.name ?? "unknown")
-        const callID = String(p.toolCallID ?? p.id ?? "")
-        // tool part 的 state 字段可能存在；若无则根据 error 字段推断
-        const hasError = p.error !== undefined && p.error !== null
-        const rawState = p.state != null ? String(p.state) : (hasError ? "error" : "running")
-        const toolState = (rawState === "completed" || rawState === "error") ? rawState : "running" as const
-
-        if (partSessionId) {
-          emit(partSessionId, {
-            type: "tool-state-changed",
-            sessionId: partSessionId,
-            callID,
-            tool: toolName,
-            state: toolState,
-          })
-        }
-        break
-      }
-
-      // delta 是增量文本，part.text 是全量文本
-      const delta = (event.properties as { delta?: string }).delta
-      if (delta) {
-        payload.textBuffer += delta
-      } else {
-        // 无 delta 时用全量文本替换（而非追加，避免文本重复）
-        const fullText = extractPartText(part)
-        if (fullText) {
-          payload.textBuffer = fullText
-        }
-      }
-
-      if (payload.textBuffer) {
-        const res = await sender.updateMessage(payload.feishuClient, payload.placeholderId, payload.textBuffer.trim())
-        if (!res.ok) {
-          // best-effort: 更新失败不阻塞
-        }
-      }
-
-      // Emit text-updated action to action-bus
-      if (partSessionId) {
-        emit(partSessionId, {
-          type: "text-updated",
-          sessionId: partSessionId,
-          messageId: part.messageID as string | undefined,
-          delta: delta ?? undefined,
-          fullText: payload.textBuffer,
-        })
-      }
+      await handleMessagePartUpdated(event, part, payload)
       break
     }
-    case "session.error": {
-      const props = event.properties as Record<string, unknown>
-      const sessionId = props.sessionID as string | undefined
-      if (!sessionId) break
-
-      const error = props.error
-      let errMsg: string
-      if (typeof error === "string") {
-        errMsg = error
-      } else if (error && typeof error === "object") {
-        const e = error as Record<string, unknown>
-        const rawDataMsg = (e.data && typeof e.data === "object" && "message" in e.data)
-          ? (e.data as { message?: unknown }).message
-          : undefined
-        const dataMsg = rawDataMsg != null ? String(rawDataMsg) : undefined
-        errMsg = String(e.message ?? dataMsg ?? e.type ?? e.name ?? "An unexpected error occurred")
-      } else {
-        errMsg = String(error)
-      }
-
-      const fields = extractErrorFields(error)
-
-      deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
-
-      setSessionError(sessionId, errMsg, fields)
-
-      // 不在此处做 fork 恢复或向用户发送错误——统一由 chat.ts catch 块处理
+    case "session.error":
+      handleSessionErrorEvent(event, deps)
       break
-    }
-    default: {
-      // 处理 SDK Event 联合类型未覆盖的事件（v2 新增事件）
-      const evtType = (event as { type: string }).type
-      const evtProps = (event as { properties?: Record<string, unknown> }).properties ?? {}
-      const evtSessionId = evtProps.sessionID as string | undefined
-
-      if (evtType === "permission.asked" && evtSessionId) {
-        emit(evtSessionId, {
-          type: "permission-requested",
-          sessionId: evtSessionId,
-          request: evtProps as PermissionRequest,
-        })
-        deps.log("info", "permission.asked 事件已分发", { sessionId: evtSessionId })
-      } else if (evtType === "question.asked" && evtSessionId) {
-        emit(evtSessionId, {
-          type: "question-requested",
-          sessionId: evtSessionId,
-          request: evtProps as QuestionRequest,
-        })
-        deps.log("info", "question.asked 事件已分发", { sessionId: evtSessionId })
-      } else if (evtType === "session.idle" && evtSessionId) {
-        emit(evtSessionId, {
-          type: "session-idle",
-          sessionId: evtSessionId,
-        })
-      }
+    default:
+      handleV2Event(event, deps)
       break
+  }
+}
+
+/**
+ * 处理 message.part.updated 事件：更新飞书占位消息 + emit action-bus 事件
+ */
+async function handleMessagePartUpdated(
+  event: Event,
+  part: { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown },
+  payload: PendingReplyPayload,
+): Promise<void> {
+  // messageID 过滤：首个事件锁定 messageID，后续只接受匹配的事件
+  const messageId = part.messageID as string | undefined
+  if (messageId) {
+    if (!payload.expectedMessageId) {
+      payload.expectedMessageId = messageId
+    } else if (payload.expectedMessageId !== messageId) {
+      return
     }
+  } else if (payload.expectedMessageId) {
+    return
+  }
+
+  const partSessionId = part.sessionID as string
+
+  // Emit tool-state-changed for tool parts (skip text-updated — tool parts have no text content)
+  if (part.type === "tool") {
+    const p = part as Record<string, unknown>
+    const toolName = String(p.toolName ?? p.name ?? "unknown")
+    const callID = String(p.toolCallID ?? p.id ?? "")
+    const hasError = p.error !== undefined && p.error !== null
+    const rawState = p.state != null ? String(p.state) : (hasError ? "error" : "running")
+    const toolState: "running" | "completed" | "error" = (rawState === "completed" || rawState === "error") ? rawState : "running"
+
+    if (partSessionId) {
+      emit(partSessionId, {
+        type: "tool-state-changed",
+        sessionId: partSessionId,
+        callID,
+        tool: toolName,
+        state: toolState,
+      })
+    }
+    return
+  }
+
+  // delta 是增量文本，part.text 是全量文本
+  const delta = (event.properties as { delta?: string }).delta
+  if (delta) {
+    payload.textBuffer += delta
+  } else {
+    const fullText = extractPartText(part)
+    if (fullText) {
+      payload.textBuffer = fullText
+    }
+  }
+
+  if (payload.textBuffer) {
+    await sender.updateMessage(payload.feishuClient, payload.placeholderId, payload.textBuffer.trim())
+  }
+
+  // Emit text-updated action to action-bus
+  if (partSessionId) {
+    emit(partSessionId, {
+      type: "text-updated",
+      sessionId: partSessionId,
+      messageId: part.messageID as string | undefined,
+      delta: delta ?? undefined,
+      fullText: payload.textBuffer,
+    })
+  }
+}
+
+/**
+ * 处理 session.error 事件：提取错误信息并缓存
+ */
+function handleSessionErrorEvent(event: Event, deps: EventDeps): void {
+  const props = event.properties as Record<string, unknown>
+  const sessionId = props.sessionID as string | undefined
+  if (!sessionId) return
+
+  const error = props.error
+  let errMsg: string
+  if (typeof error === "string") {
+    errMsg = error
+  } else if (error && typeof error === "object") {
+    const e = error as Record<string, unknown>
+    const asStr = (v: unknown): string | undefined =>
+      typeof v === "string" && v.trim().length > 0 ? v : undefined
+    const rawDataMsg = (e.data && typeof e.data === "object" && "message" in e.data)
+      ? (e.data as { message?: unknown }).message
+      : undefined
+    errMsg = asStr(e.message) ?? asStr(rawDataMsg) ?? asStr(e.type) ?? asStr(e.name) ?? "An unexpected error occurred"
+  } else {
+    errMsg = String(error)
+  }
+
+  const fields = extractErrorFields(error)
+
+  deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
+
+  sessionErrors.set(sessionId, { message: errMsg, fields })
+
+  // 不在此处做 fork 恢复或向用户发送错误——统一由 chat.ts catch 块处理
+}
+
+/**
+ * 处理 v2 新增事件：permission.asked / question.asked / session.idle
+ */
+function handleV2Event(event: Event, deps: EventDeps): void {
+  const evtType = (event as { type: string }).type
+  const evtProps = (event as { properties?: Record<string, unknown> }).properties ?? {}
+  const evtSessionId = evtProps.sessionID as string | undefined
+
+  if (evtType === "permission.asked" && evtSessionId) {
+    emit(evtSessionId, {
+      type: "permission-requested",
+      sessionId: evtSessionId,
+      request: evtProps as PermissionRequest,
+    })
+    deps.log("info", "permission.asked 事件已分发", { sessionId: evtSessionId })
+  } else if (evtType === "question.asked" && evtSessionId) {
+    emit(evtSessionId, {
+      type: "question-requested",
+      sessionId: evtSessionId,
+      request: evtProps as QuestionRequest,
+    })
+    deps.log("info", "question.asked 事件已分发", { sessionId: evtSessionId })
+  } else if (evtType === "session.idle" && evtSessionId) {
+    emit(evtSessionId, {
+      type: "session-idle",
+      sessionId: evtSessionId,
+    })
   }
 }
 

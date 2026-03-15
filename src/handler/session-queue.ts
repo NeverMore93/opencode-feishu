@@ -21,6 +21,8 @@ interface QueueState {
   processing: boolean
 }
 
+const QUEUE_MONITOR_INTERVAL_MS = 200
+
 /** 全局队列状态：sessionKey → QueueState */
 const states = new Map<string, QueueState>()
 
@@ -226,7 +228,7 @@ async function drainLoop(sessionKey: string, state: QueueState): Promise<void> {
       const autoPromptController = new AbortController()
       const monitor = setInterval(() => {
         if (state.queue.length > 0) autoPromptController.abort()
-      }, 200)
+      }, QUEUE_MONITOR_INTERVAL_MS)
       try {
         const result = await runOneAutoPromptIteration(
           autoPromptCtx,

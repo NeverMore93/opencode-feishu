@@ -40,26 +40,10 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     }).catch(() => {})
   }
 
-  // 从 ~/.config/opencode/plugins/feishu.json 读取配置
   const configPath = join(homedir(), ".config", "opencode", "plugins", "feishu.json")
-
-  if (!existsSync(configPath)) {
-    throw new Error(
-      `缺少飞书配置文件：请创建 ${configPath}，内容为 {"appId":"cli_xxx","appSecret":"xxx"}`,
-    )
-  }
-
   let resolvedConfig: ResolvedConfig
   try {
-    const raw = resolveEnvPlaceholders(
-      JSON.parse(readFileSync(configPath, "utf-8")),
-    )
-    const parsed = FeishuConfigSchema.parse(raw)
-    // directory 后置处理：~ 展开和 ctx.directory fallback
-    resolvedConfig = {
-      ...parsed,
-      directory: expandDirectoryPath(parsed.directory ?? ctx.directory ?? ""),
-    }
+    resolvedConfig = loadAndValidateConfig(configPath, ctx.directory ?? "")
   } catch (e) {
     if (e instanceof z.ZodError) {
       const details = e.issues.map(i => `  - ${i.path.join(".")}: ${i.message}`).join("\n")
@@ -148,6 +132,19 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     },
   }
   return hooks
+}
+
+/**
+ * 从配置文件读取、解析环境变量占位符、Zod 验证、展开 directory 路径。
+ * 抛出 ZodError / SyntaxError / Error（文件不存在）。
+ */
+function loadAndValidateConfig(configPath: string, ctxDirectory: string): ResolvedConfig {
+  if (!existsSync(configPath)) {
+    throw new Error(`缺少飞书配置文件：请创建 ${configPath}，内容为 {"appId":"cli_xxx","appSecret":"xxx"}`)
+  }
+  const raw = resolveEnvPlaceholders(JSON.parse(readFileSync(configPath, "utf-8")))
+  const parsed = FeishuConfigSchema.parse(raw)
+  return { ...parsed, directory: expandDirectoryPath(parsed.directory ?? ctxDirectory ?? "") }
 }
 
 /**

@@ -9,6 +9,18 @@ export interface FeishuSendResult {
   error?: string;
 }
 
+async function wrapSendCall(
+  fn: () => Promise<any>,
+  idExtractor: (res: any) => string = (res) => res?.data?.message_id ?? "",
+): Promise<FeishuSendResult> {
+  try {
+    const res = await fn()
+    return { ok: true, messageId: idExtractor(res) }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 /**
  * 发送文本消息到飞书会话
  */
@@ -20,19 +32,16 @@ export async function sendTextMessage(
   if (!chatId?.trim()) {
     return { ok: false, error: "No chat_id provided" };
   }
-  try {
-    const res = await client.im.message.create({
+  return wrapSendCall(() =>
+    client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId.trim(),
         msg_type: "text",
         content: JSON.stringify({ text }),
       },
-    });
-    return { ok: true, messageId: res?.data?.message_id ?? "" };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+    }),
+  )
 }
 
 /**
@@ -43,18 +52,16 @@ export async function updateMessage(
   messageId: string,
   text: string
 ): Promise<FeishuSendResult> {
-  try {
-    await client.im.message.update({
+  return wrapSendCall(
+    () => client.im.message.update({
       path: { message_id: messageId },
       data: {
         msg_type: "text",
         content: JSON.stringify({ text }),
       },
-    });
-    return { ok: true, messageId };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+    }),
+    () => messageId,
+  )
 }
 
 /**
@@ -82,19 +89,16 @@ export async function sendInteractiveCard(
   if (!chatId?.trim()) {
     return { ok: false, error: "No chat_id provided" }
   }
-  try {
-    const res = await client.im.message.create({
+  return wrapSendCall(() =>
+    client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId.trim(),
         msg_type: "interactive",
         content: JSON.stringify(card),
       },
-    })
-    return { ok: true, messageId: res?.data?.message_id ?? "" }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
-  }
+    }),
+  )
 }
 
 /**
@@ -108,17 +112,14 @@ export async function sendCardMessage(
   if (!chatId?.trim()) {
     return { ok: false, error: "No chat_id provided" };
   }
-  try {
-    const res = await client.im.message.create({
+  return wrapSendCall(() =>
+    client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId.trim(),
         msg_type: "interactive",
         content: JSON.stringify({ type: "card_kit", data: { card_id: cardId } }),
       },
-    });
-    return { ok: true, messageId: res?.data?.message_id ?? "" };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+    }),
+  )
 }

@@ -6,11 +6,9 @@ import type { OpencodeClient } from "@opencode-ai/sdk"
 import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
-  getSessionError, clearSessionError,
-  clearRetryAttempts, getRetryAttempts, setRetryAttempts, MAX_RETRY_ATTEMPTS,
-  isModelError,
-  type CachedSessionError,
+  getSessionError, clearSessionError, clearRetryAttempts,
 } from "./event.js"
+import { SessionErrorDetected, extractSessionError, tryModelRecovery } from "./error-recovery.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
@@ -224,126 +222,44 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       return undefined
     }
 
-    // pollForResponse 检测到 SSE 错误时直接携带 sessionError
-    let sessionError: CachedSessionError | undefined
-    if (err instanceof SessionErrorDetected) {
-      sessionError = err.sessionError
-      clearSessionError(session.id)
-    } else {
-      // promptAsync 的 HTTP 级错误（400/404），检查是否有 SSE 错误
-      sessionError = getSessionError(session.id)
-      clearSessionError(session.id)
-    }
+    // 提取会话错误信息（来自 SessionErrorDetected 或 SSE 缓存）
+    const sessionError = extractSessionError(err, session.id)
+    let displayError = sessionError
 
+    // 模型不兼容错误恢复
     if (sessionError) {
-      log("info", "错误字段检查", {
-        sessionKey,
-        fields: sessionError.fields,
-        isModel: isModelError(sessionError.fields),
-      })
-    }
-
-    // 模型不兼容错误：用可用模型重试
-    if (sessionError && isModelError(sessionError.fields)) {
-      const attempts = getRetryAttempts(sessionKey)
-      if (attempts < MAX_RETRY_ATTEMPTS) {
-        try {
-          let modelOverride: { providerID: string; modelID: string } | undefined
-          try {
-            modelOverride = await getGlobalDefaultModel(client, directory)
-          } catch (configErr) {
-            log("warn", "读取全局模型配置失败", {
-              sessionKey,
-              error: configErr instanceof Error ? configErr.message : String(configErr),
-            })
-          }
-          if (!modelOverride) {
-            log("warn", "全局默认模型未配置，放弃恢复", { sessionKey })
-          } else {
-            setRetryAttempts(sessionKey, attempts + 1)
-            log("info", "使用全局默认模型恢复", {
-              sessionKey,
-              providerID: modelOverride.providerID,
-              modelID: modelOverride.modelID,
-            })
-
-            clearSessionError(session.id)
-            await client.session.promptAsync({
-              path: { id: session.id },
-              query,
-              body: { ...baseBody, model: modelOverride },
-            })
-
-            const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query, signal })
-
-            log("info", "模型恢复后响应完成", {
-              sessionKey,
-              sessionId: session.id,
-              output: finalText || "(empty)",
-            })
-
-            clearRetryAttempts(sessionKey)
-            await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
-
-            log("info", "模型不兼容恢复成功", {
-              sessionId: session.id,
-              sessionKey,
-              model: `${modelOverride.providerID}/${modelOverride.modelID}`,
-              attempt: attempts + 1,
-            })
-
-            if (config.autoPrompt.enabled && shouldReply) {
-              return { sessionId: session.id, sessionKey, chatId, deps }
-            }
-            return undefined
-          }
-        } catch (recoveryErr) {
-          // AbortError during recovery = interrupted
-          if (recoveryErr instanceof Error && recoveryErr.name === "AbortError") {
-            log("info", "模型恢复被中断", { sessionKey })
-            await abortCleanup(streamingCard, feishuClient, placeholderId)
-            return undefined
-          }
-
-          const errMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
-          if (recoveryErr instanceof SessionErrorDetected) {
-            sessionError = recoveryErr.sessionError
-            clearSessionError(session.id)
-          } else {
-            const sseError = getSessionError(session.id)
-            if (sseError) {
-              sessionError = sseError
-              clearSessionError(session.id)
-            } else {
-              sessionError = { message: errMsg, fields: [] }
-            }
-          }
-          log("error", "模型恢复失败", {
-            sessionId: session.id,
-            sessionKey,
-            error: errMsg,
-          })
-        }
-      } else {
-        log("warn", "已达重试上限，放弃恢复", {
-          sessionKey,
-          attempts,
+      try {
+        const recovery = await tryModelRecovery({
+          sessionError, sessionId: session.id, sessionKey, client, directory,
+          parts, timeout, pollInterval, stablePolls, query, signal, log,
+          poll: pollForResponse,
         })
+
+        if (recovery.recovered) {
+          await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, recovery.text || "⚠️ 响应超时")
+          if (config.autoPrompt.enabled && shouldReply) {
+            return { sessionId: session.id, sessionKey, chatId, deps }
+          }
+          return undefined
+        }
+        displayError = recovery.sessionError
+      } catch (abortErr) {
+        if (abortErr instanceof Error && abortErr.name === "AbortError") {
+          log("info", "模型恢复被中断", { sessionKey })
+          await abortCleanup(streamingCard, feishuClient, placeholderId)
+          return undefined
+        }
+        throw abortErr
       }
     }
 
     // 正常错误处理
     const thrownError = err instanceof Error ? err.message : String(err)
-    const errorMessage = sessionError?.message || thrownError
-
+    const errorMessage = displayError?.message || thrownError
     log("error", "对话处理失败", {
-      sessionId: session.id,
-      sessionKey,
-      chatType,
+      sessionId: session.id, sessionKey, chatType,
       error: thrownError,
-      ...(sessionError
-        ? { sessionError: sessionError.message }
-        : {}),
+      ...(displayError ? { sessionError: displayError.message } : {}),
     })
     await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, "❌ " + errorMessage)
   } finally {
@@ -352,25 +268,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     if (cardUnsub) cardUnsub()
     unregisterPending(activeSessionId)
   }
-}
-
-/**
- * 从全局配置读取默认模型（Config.model 字段），解析为 { providerID, modelID }。
- * 不在失败 provider 内搜索替代 — 只用用户明确配置的默认模型。
- */
-async function getGlobalDefaultModel(
-  client: OpencodeClient,
-  directory?: string,
-): Promise<{ providerID: string; modelID: string } | undefined> {
-  const query = directory ? { directory } : undefined
-  const { data: config } = await client.config.get({ query })
-  const model = config?.model
-  if (!model || !model.includes("/")) return undefined
-  const slash = model.indexOf("/")
-  const providerID = model.slice(0, slash).trim()
-  const modelID = model.slice(slash + 1).trim()
-  if (!providerID || !modelID) return undefined
-  return { providerID, modelID }
 }
 
 /**
@@ -405,14 +302,6 @@ async function buildPromptParts(
   }
 
   return parts
-}
-
-/** pollForResponse 检测到 SSE 错误时抛出的异常 */
-class SessionErrorDetected extends Error {
-  constructor(public readonly sessionError: CachedSessionError) {
-    super(sessionError.message)
-    this.name = "SessionErrorDetected"
-  }
 }
 
 /**
