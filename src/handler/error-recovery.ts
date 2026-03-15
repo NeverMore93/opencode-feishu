@@ -48,14 +48,11 @@ async function getGlobalDefaultModel(
  * 检查 SessionErrorDetected 和 SSE 缓存两个来源。
  */
 export function extractSessionError(err: unknown, sessionId: string): CachedSessionError | undefined {
-  if (err instanceof SessionErrorDetected) {
-    const result = err.sessionError
-    clearSessionError(sessionId)
-    return result
-  }
-  const cached = getSessionError(sessionId)
+  const result = err instanceof SessionErrorDetected
+    ? err.sessionError
+    : getSessionError(sessionId)
   clearSessionError(sessionId)
-  return cached
+  return result
 }
 
 type PollFn = (

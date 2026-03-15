@@ -183,7 +183,7 @@ async function handleMessagePartUpdated(
     const callID = String(p.toolCallID ?? p.id ?? "")
     const hasError = p.error !== undefined && p.error !== null
     const rawState = p.state != null ? String(p.state) : (hasError ? "error" : "running")
-    const toolState = (rawState === "completed" || rawState === "error") ? rawState : "running"
+    const toolState: "running" | "completed" | "error" = (rawState === "completed" || rawState === "error") ? rawState : "running"
 
     if (partSessionId) {
       emit(partSessionId, {
