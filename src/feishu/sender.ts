@@ -10,11 +10,12 @@ export interface FeishuSendResult {
 }
 
 async function wrapSendCall(
-  fn: () => Promise<{ data?: { message_id?: string } }>,
+  fn: () => Promise<any>,
+  idExtractor: (res: any) => string = (res) => res?.data?.message_id ?? "",
 ): Promise<FeishuSendResult> {
   try {
     const res = await fn()
-    return { ok: true, messageId: res?.data?.message_id ?? "" }
+    return { ok: true, messageId: idExtractor(res) }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -51,16 +52,16 @@ export async function updateMessage(
   messageId: string,
   text: string
 ): Promise<FeishuSendResult> {
-  return wrapSendCall(async () => {
-    await client.im.message.update({
+  return wrapSendCall(
+    () => client.im.message.update({
       path: { message_id: messageId },
       data: {
         msg_type: "text",
         content: JSON.stringify({ text }),
       },
-    })
-    return { data: { message_id: messageId } }
-  })
+    }),
+    () => messageId,
+  )
 }
 
 /**

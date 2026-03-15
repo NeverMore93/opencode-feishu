@@ -22,6 +22,7 @@ export class TtlMap<V> {
       this.data.delete(key)
       this.timers.delete(key)
     }, ttlMs ?? this.defaultTtlMs)
+    timer.unref()
     this.timers.set(key, timer)
   }
 
