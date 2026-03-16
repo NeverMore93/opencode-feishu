@@ -2,21 +2,16 @@
  * 交互式事件处理：权限审批/问答卡片发送 + 回调分发
  */
 import type { PermissionRequest, QuestionRequest, LogFn } from "../types.js"
-import { buildPermissionCard, buildQuestionCard } from "../feishu/card-builder.js"
+import { buildCardFromDSL, type ButtonInput, type SectionInput } from "../tools/send-card.js"
 import * as sender from "../feishu/sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
+import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { TtlMap } from "../utils/ttl-map.js"
 
 export interface InteractiveDeps {
   feishuClient: InstanceType<typeof Lark.Client>
   log: LogFn
-  v2Client?: {
-    permission: { reply: (opts: { path: { requestID: string }; body: { reply: string; message?: string } }) => Promise<unknown> }
-    question: {
-      reply: (opts: { path: { requestID: string }; body: { answers: string[][] } }) => Promise<unknown>
-      reject: (opts: { path: { requestID: string } }) => Promise<unknown>
-    }
-  }
+  v2Client?: OpencodeClient
 }
 
 /** 去重：同一 requestId 只发一张卡片（TTL 防止内存泄漏） */
@@ -40,7 +35,7 @@ export function handlePermissionRequested(
   const requestId = String(request.id ?? "")
   if (!requestId || !markSeen(requestId)) return
 
-  const card = buildPermissionCard(request)
+  const card = buildPermissionCardDSL(request, chatId)
   sender.sendInteractiveCard(deps.feishuClient, chatId, card).catch((err) => {
     deps.log("warn", "发送权限卡片失败", {
       requestId,
@@ -61,7 +56,7 @@ export function handleQuestionRequested(
   const requestId = String(request.id ?? "")
   if (!requestId || !markSeen(requestId)) return
 
-  const card = buildQuestionCard(request)
+  const card = buildQuestionCardDSL(request, chatId)
   sender.sendInteractiveCard(deps.feishuClient, chatId, card).catch((err) => {
     deps.log("warn", "发送问答卡片失败", {
       requestId,
@@ -93,7 +88,7 @@ export async function handleCardAction(
     return
   }
 
-  type PermissionReplyValue = { action: "permission_reply"; requestId: string; reply: string }
+  type PermissionReplyValue = { action: "permission_reply"; requestId: string; reply: "once" | "always" | "reject" }
   type QuestionReplyValue = { action: "question_reply"; requestId: string; answers: string[][] }
   type ActionValue = PermissionReplyValue | QuestionReplyValue | { action?: string; requestId?: string }
 
@@ -110,13 +105,13 @@ export async function handleCardAction(
   try {
     if (value.action === "permission_reply" && "reply" in value) {
       await deps.v2Client.permission.reply({
-        path: { requestID: requestId },
-        body: { reply: value.reply },
+        requestID: requestId,
+        reply: value.reply,
       })
     } else if (value.action === "question_reply" && "answers" in value) {
       await deps.v2Client.question.reply({
-        path: { requestID: requestId },
-        body: { answers: value.answers },
+        requestID: requestId,
+        answers: value.answers,
       })
     }
   } catch (err) {
@@ -157,5 +152,85 @@ export function buildCallbackResponse(action: CardActionData): object {
     }
   }
 
+  if (value.action === "send_message") {
+    return {
+      toast: { type: "info", content: "📨 已发送" },
+    }
+  }
+
   return {}
+}
+
+/**
+ * 使用统一 DSL 构建权限审批卡片
+ */
+function buildPermissionCardDSL(request: PermissionRequest, chatId: string): object {
+  const permission = String(request.permission ?? "unknown")
+  const patterns = Array.isArray(request.patterns) ? request.patterns.map(String) : []
+  const requestId = String(request.id ?? "")
+
+  const patternsText = patterns.length > 0
+    ? patterns.map(p => `- ${p}`).join("\n")
+    : "（无具体路径）"
+
+  const buttons: ButtonInput[] = [
+    {
+      text: "✅ 允许一次", value: "", style: "primary",
+      actionPayload: { action: "permission_reply", requestId, reply: "once" },
+    },
+    {
+      text: "🔓 始终允许", value: "", style: "default",
+      actionPayload: { action: "permission_reply", requestId, reply: "always" },
+    },
+    {
+      text: "❌ 拒绝", value: "", style: "danger",
+      actionPayload: { action: "permission_reply", requestId, reply: "reject" },
+    },
+  ]
+
+  const sections: SectionInput[] = [
+    { type: "markdown", content: `AI 请求以下权限:\n\n${patternsText}` },
+    { type: "actions", buttons },
+  ]
+
+  const dsl = { title: `🔐 权限请求: ${permission}`, template: "orange", sections }
+  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, "p2p") }
+}
+
+/**
+ * 使用统一 DSL 构建问答选择卡片
+ */
+function buildQuestionCardDSL(request: QuestionRequest, chatId: string): object {
+  const questions = Array.isArray(request.questions) ? request.questions : []
+  const requestId = String(request.id ?? "")
+
+  type QuestionInfo = {
+    question?: string
+    header?: string
+    options?: Array<{ label?: string; value?: string }>
+  }
+
+  const q = questions[0] as QuestionInfo | undefined
+  const header = String(q?.header ?? "AI 提问")
+  const questionText = String(q?.question ?? "请选择")
+  const options = Array.isArray(q?.options) ? q.options : []
+
+  const buttons: ButtonInput[] = options.map((opt, idx) => ({
+    text: String(opt.label ?? opt.value ?? `选项 ${idx + 1}`),
+    value: "",
+    style: idx === 0 ? "primary" as const : "default" as const,
+    actionPayload: {
+      action: "question_reply",
+      requestId,
+      answers: [[String(opt.value ?? opt.label ?? "")]],
+    },
+  }))
+
+  const sections: SectionInput[] = [
+    { type: "markdown", content: questionText },
+    ...(buttons.length > 0 ? [{ type: "actions" as const, buttons }] : []),
+  ]
+
+  const dsl = { title: header, template: "blue", sections }
+  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, "p2p") }
 }

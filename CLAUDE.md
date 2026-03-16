@@ -1,4 +1,4 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 本文件为 Claude Code (claude.ai/code) 在此代码仓库中工作时提供指导。
 
@@ -195,10 +195,11 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - `ProcessedAction` 联合类型：7 种事件（text-updated、tool-state-changed、subtask-discovered、permission-requested、question-requested、session-idle、session-error）
 
 **交互处理器 (`src/handler/interactive.ts`):**
-- `handlePermissionRequested`/`handleQuestionRequested`：构建交互卡片并发送到飞书
+- `handlePermissionRequested`/`handleQuestionRequested`：使用 `buildCardFromDSL` 构建交互卡片并发送到飞书
 - `handleCardAction`：解析按钮回调 value → 路由到 v2Client permission/question reply
 - `seenRequestIds` 防止重复发送交互卡片
 - `buildCallbackResponse`：返回 toast 即时反馈（3 秒约束）
+- 权限/问答卡片通过 `actionPayload` 字段注入按钮回调数据，复用统一 DSL 构建路径
 
 **CardKit 客户端 (`src/feishu/cardkit.ts`):**
 - `CardKitClient` 类：SDK thin wrapper，委托 `client.cardkit.v1.*` 方法
@@ -214,10 +215,6 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - `close(finalMarkdown?)` → 清理 markdown + 截断 + 关闭流式模式
 - `destroy()` → 删除消息（abort 场景）
 
-**卡片构建器 (`src/feishu/card-builder.ts`):**
-- `buildPermissionCard(request)`：橙色头部 + patterns 列表 + 3 按钮（允许一次/始终允许/拒绝）
-- `buildQuestionCard(request)`：蓝色头部 + 问题文本 + 选项按钮
-
 **Markdown 工具 (`src/feishu/markdown.ts`):**
 - `cleanMarkdown(text)`：移除 HTML 标签、确保代码块闭合
 - `truncateMarkdown(text, limit)`：截断到 28KB 并添加提示后缀
@@ -230,6 +227,17 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 通过飞书 API 发送、更新和删除消息
 - `sendCardMessage(client, chatId, cardId)` — 发送 CardKit 流式卡片
 - `sendInteractiveCard(client, chatId, card)` — 发送交互式卡片（权限/问答）
+
+**Agent 卡片 Tool (`src/tools/send-card.ts`):**
+- `createSendCardTool(deps)` — 注册 `feishu_send_card` tool，agent 可自主发送结构化卡片
+- `buildCardFromDSL(args, chatId, chatType)` — 统一 DSL → CardKit 2.0 JSON 翻译（同时被 agent tool 和权限/问答卡片复用）
+- `ButtonInput.actionPayload` — 内部字段，有此字段时直接用作按钮 value（权限/问答场景），无时构造 send_message action
+- `SectionInput` — 支持 markdown/divider/note/actions 四种区块类型
+
+**会话-聊天映射 (`src/feishu/session-chat-map.ts`):**
+- `registerSessionChat(sessionId, chatId, chatType)` — 注册 sessionId → chatId 映射
+- `getChatIdBySession(sessionId)` — 查询映射
+- 供 feishu_send_card tool 和 system prompt 注入使用
 
 **辅助模块：**
 - `src/feishu/dedup.ts` - 10 分钟消息去重窗口
