@@ -87,6 +87,17 @@ export type LogFn = (
   extra?: Record<string, unknown>,
 ) => void
 
-// TODO: Replace with proper SDK v2 types once @opencode-ai/sdk/v2 exports them
-export type PermissionRequest = Record<string, unknown>
-export type QuestionRequest = Record<string, unknown>
+export interface PermissionRequest {
+  id?: string | number
+  permission?: string
+  patterns?: string[]
+}
+
+export interface QuestionRequest {
+  id?: string | number
+  questions?: Array<{
+    question?: string
+    header?: string
+    options?: Array<{ label?: string; value?: string }>
+  }>
+}

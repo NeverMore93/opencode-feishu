@@ -3,6 +3,7 @@
  */
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
 import * as Lark from "@larksuiteoapi/node-sdk"
 import type { Plugin, Hooks } from "@opencode-ai/plugin"
@@ -15,10 +16,25 @@ import { handleEvent } from "./handler/event.js"
 import { handleCardAction, type InteractiveDeps } from "./handler/interactive.js"
 import { ingestGroupHistory } from "./feishu/history.js"
 import { initDedup } from "./feishu/dedup.js"
+import { createSendCardTool } from "./tools/send-card.js"
+import { getChatIdBySession } from "./feishu/session-chat-map.js"
+import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 
 const SERVICE_NAME = "opencode-feishu"
 const LOG_PREFIX = "[feishu]"
 const isDebug = !!process.env.FEISHU_DEBUG
+
+/** 从 skills/ 目录加载飞书交互决策指南（修改内容无需重新构建，重启即生效） */
+function loadFeishuSkill(): string {
+  const skillPath = join(fileURLToPath(import.meta.url), "../../skills/feishu-card-interaction.md")
+  if (existsSync(skillPath)) {
+    return readFileSync(skillPath, "utf-8")
+  }
+  // fallback：skill 文件缺失时使用最小提示
+  return "当前用户通过飞书（Feishu/Lark）与你对话。你可以使用 feishu_send_card 工具发送格式化卡片消息（支持按钮交互）。"
+}
+
+const feishuSystemPrompt = loadFeishuSkill()
 
 
 export const FeishuPlugin: Plugin = async (ctx) => {
@@ -70,8 +86,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   // 获取 bot open_id（用于群聊 @提及检测）
   const botOpenId = await fetchBotOpenId(larkClient, log)
 
-  // TODO: Enable when @opencode-ai/sdk/v2 is available
-  const v2Client = undefined
+  const v2Client = createOpencodeClient({ directory: resolvedConfig.directory || undefined })
 
   // 启动飞书 WebSocket 网关（复用 larkClient）
   gateway = startFeishuGateway({
@@ -129,6 +144,14 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     event: async ({ event }) => {
       if (!gateway) return
       await handleEvent(event, { log, directory: resolvedConfig.directory })
+    },
+    tool: {
+      feishu_send_card: createSendCardTool({ feishuClient: larkClient, log }),
+    },
+    "experimental.chat.system.transform": async (input, output) => {
+      // 仅在飞书会话中注入提示，非飞书会话不干扰 agent
+      if (!input.sessionID || !getChatIdBySession(input.sessionID)) return
+      output.system.push(feishuSystemPrompt)
     },
   }
   return hooks

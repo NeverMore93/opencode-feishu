@@ -10,6 +10,7 @@ import {
 } from "./event.js"
 import { SessionErrorDetected, extractSessionError, tryModelRecovery } from "./error-recovery.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
+import { registerSessionChat } from "../feishu/session-chat-map.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import { subscribe } from "./action-bus.js"
@@ -72,6 +73,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
 
   const session = await getOrCreateSession(client, sessionKey, directory)
+  registerSessionChat(session.id, chatId, chatType)
 
   // 提取消息内容为 OpenCode parts
   const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log)
@@ -175,12 +177,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           break
         case "permission-requested":
           if (deps.interactiveDeps) {
-            handlePermissionRequested(action.request, chatId, deps.interactiveDeps)
+            handlePermissionRequested(action.request, chatId, deps.interactiveDeps, chatType)
           }
           break
         case "question-requested":
           if (deps.interactiveDeps) {
-            handleQuestionRequested(action.request, chatId, deps.interactiveDeps)
+            handleQuestionRequested(action.request, chatId, deps.interactiveDeps, chatType)
           }
           break
       }

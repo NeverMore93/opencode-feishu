@@ -4,6 +4,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import type { Agent } from "node:https"
+import { randomUUID } from "node:crypto"
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import { type CardActionData, buildCallbackResponse } from "../handler/interactive.js"
 import { isDuplicate } from "./dedup.js"
@@ -157,6 +158,27 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           operatorId: String(evt.operator?.open_id ?? ""),
         }
 
+        // 检测 send_message 按钮：构造合成消息，走正常消息流程
+        const sendMsg = parseSendMessageAction(action)
+        if (sendMsg) {
+          const syntheticCtx: FeishuMessageContext = {
+            chatId: sendMsg.chatId,
+            messageId: `btn-${randomUUID()}`,
+            messageType: "text",
+            content: sendMsg.text,
+            rawContent: JSON.stringify({ text: sendMsg.text }),
+            chatType: sendMsg.chatType,
+            senderId: action.operatorId ?? "",
+            shouldReply: true,
+          }
+          void Promise.resolve(onMessage(syntheticCtx)).catch((err: unknown) => {
+            log("error", "send_message 按钮处理失败", {
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+          return buildCallbackResponse(action)
+        }
+
         // fire-and-forget（必须 3s 内返回）
         if (onCardAction) {
           void onCardAction(action).catch((err) => {
@@ -211,4 +233,28 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   }
 
   return { client: larkClient, stop }
+}
+
+interface SendMessagePayload {
+  chatId: string
+  chatType: "p2p" | "group"
+  text: string
+}
+
+/**
+ * 解析 send_message 类型的按钮回调 value
+ */
+function parseSendMessageAction(action: CardActionData): SendMessagePayload | undefined {
+  if (!action.actionValue) return undefined
+  try {
+    const value = JSON.parse(action.actionValue) as Record<string, unknown>
+    if (value.action !== "send_message") return undefined
+    const text = typeof value.text === "string" ? value.text : ""
+    const chatId = typeof value.chatId === "string" ? value.chatId : ""
+    if (!text || !chatId) return undefined
+    const chatType = value.chatType === "group" ? "group" as const : "p2p" as const
+    return { chatId, chatType, text }
+  } catch {
+    return undefined
+  }
 }
