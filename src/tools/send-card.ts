@@ -116,37 +116,38 @@ export function buildCardFromDSL(
     },
     body: {
       elements: args.sections.map((s) => {
-        if (s.type === "divider") {
-          return { tag: "hr" }
+        switch (s.type) {
+          case "divider":
+            return { tag: "hr" }
+          case "note":
+            return {
+              tag: "note",
+              elements: [{ tag: "plain_text", content: s.content ?? "" }],
+            }
+          case "actions":
+            if (!s.buttons?.length) return null
+            return {
+              tag: "action",
+              actions: s.buttons.map((btn) => ({
+                tag: "button",
+                text: { tag: "plain_text", content: btn.text },
+                type: btn.style,
+                value: JSON.stringify(btn.actionPayload ?? {
+                  action: "send_message",
+                  chatId,
+                  chatType,
+                  text: btn.value,
+                }),
+              })),
+            }
+          case "markdown":
+          default:
+            return {
+              tag: "markdown",
+              content: truncateMarkdown(s.content ?? "", 28_000),
+            }
         }
-        if (s.type === "note") {
-          return {
-            tag: "note",
-            elements: [{ tag: "plain_text", content: s.content ?? "" }],
-          }
-        }
-        if (s.type === "actions" && s.buttons?.length) {
-          return {
-            tag: "action",
-            actions: s.buttons.map((btn) => ({
-              tag: "button",
-              text: { tag: "plain_text", content: btn.text },
-              type: btn.style,
-              value: JSON.stringify(btn.actionPayload ?? {
-                action: "send_message",
-                chatId,
-                chatType,
-                text: btn.value,
-              }),
-            })),
-          }
-        }
-        // markdown
-        return {
-          tag: "markdown",
-          content: truncateMarkdown(s.content ?? "", 28_000),
-        }
-      }),
+      }).filter(Boolean),
     },
   }
 }

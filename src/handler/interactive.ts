@@ -203,16 +203,10 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
  * 使用统一 DSL 构建问答选择卡片
  */
 function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group"): object {
-  const questions = Array.isArray(request.questions) ? request.questions : []
+  const questions = request.questions ?? []
   const requestId = String(request.id ?? "")
 
-  type QuestionInfo = {
-    question?: string
-    header?: string
-    options?: Array<{ label?: string; value?: string }>
-  }
-
-  const q = questions[0] as QuestionInfo | undefined
+  const q = questions[0]
   const header = String(q?.header ?? "AI 提问")
   const questionText = String(q?.question ?? "请选择")
   const options = Array.isArray(q?.options) ? q.options : []

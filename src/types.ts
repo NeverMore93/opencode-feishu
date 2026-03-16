@@ -87,5 +87,17 @@ export type LogFn = (
   extra?: Record<string, unknown>,
 ) => void
 
-export type PermissionRequest = Record<string, unknown>
-export type QuestionRequest = Record<string, unknown>
+export interface PermissionRequest {
+  id?: string | number
+  permission?: string
+  patterns?: string[]
+}
+
+export interface QuestionRequest {
+  id?: string | number
+  questions?: Array<{
+    question?: string
+    header?: string
+    options?: Array<{ label?: string; value?: string }>
+  }>
+}
