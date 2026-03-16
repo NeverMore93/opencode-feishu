@@ -132,12 +132,12 @@ export function buildCardFromDSL(
               tag: "button",
               text: { tag: "plain_text", content: btn.text },
               type: btn.style,
-              value: btn.actionPayload ?? {
+              value: JSON.stringify(btn.actionPayload ?? {
                 action: "send_message",
                 chatId,
                 chatType,
                 text: btn.value,
-              },
+              }),
             })),
           }
         }

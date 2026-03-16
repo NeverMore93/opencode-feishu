@@ -177,12 +177,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           break
         case "permission-requested":
           if (deps.interactiveDeps) {
-            handlePermissionRequested(action.request, chatId, deps.interactiveDeps)
+            handlePermissionRequested(action.request, chatId, deps.interactiveDeps, chatType)
           }
           break
         case "question-requested":
           if (deps.interactiveDeps) {
-            handleQuestionRequested(action.request, chatId, deps.interactiveDeps)
+            handleQuestionRequested(action.request, chatId, deps.interactiveDeps, chatType)
           }
           break
       }

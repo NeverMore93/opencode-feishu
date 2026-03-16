@@ -4,6 +4,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import type { Agent } from "node:https"
+import { randomUUID } from "node:crypto"
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import { type CardActionData, buildCallbackResponse } from "../handler/interactive.js"
 import { isDuplicate } from "./dedup.js"
@@ -162,7 +163,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         if (sendMsg) {
           const syntheticCtx: FeishuMessageContext = {
             chatId: sendMsg.chatId,
-            messageId: `btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            messageId: `btn-${randomUUID()}`,
             messageType: "text",
             content: sendMsg.text,
             rawContent: JSON.stringify({ text: sendMsg.text }),

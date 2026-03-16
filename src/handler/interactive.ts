@@ -27,6 +27,7 @@ export function handlePermissionRequested(
   request: PermissionRequest,
   chatId: string,
   deps: InteractiveDeps,
+  chatType: "p2p" | "group" = "p2p",
 ): void {
   if (!deps.v2Client) {
     deps.log("warn", "v2Client 未配置，跳过权限卡片发送", { requestId: String(request.id ?? "") })
@@ -35,7 +36,7 @@ export function handlePermissionRequested(
   const requestId = String(request.id ?? "")
   if (!requestId || !markSeen(requestId)) return
 
-  const card = buildPermissionCardDSL(request, chatId)
+  const card = buildPermissionCardDSL(request, chatId, chatType)
   sender.sendInteractiveCard(deps.feishuClient, chatId, card).catch((err) => {
     deps.log("warn", "发送权限卡片失败", {
       requestId,
@@ -48,6 +49,7 @@ export function handleQuestionRequested(
   request: QuestionRequest,
   chatId: string,
   deps: InteractiveDeps,
+  chatType: "p2p" | "group" = "p2p",
 ): void {
   if (!deps.v2Client) {
     deps.log("warn", "v2Client 未配置，跳过问答卡片发送", { requestId: String(request.id ?? "") })
@@ -56,7 +58,7 @@ export function handleQuestionRequested(
   const requestId = String(request.id ?? "")
   if (!requestId || !markSeen(requestId)) return
 
-  const card = buildQuestionCardDSL(request, chatId)
+  const card = buildQuestionCardDSL(request, chatId, chatType)
   sender.sendInteractiveCard(deps.feishuClient, chatId, card).catch((err) => {
     deps.log("warn", "发送问答卡片失败", {
       requestId,
@@ -164,13 +166,13 @@ export function buildCallbackResponse(action: CardActionData): object {
 /**
  * 使用统一 DSL 构建权限审批卡片
  */
-function buildPermissionCardDSL(request: PermissionRequest, chatId: string): object {
+function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chatType: "p2p" | "group"): object {
   const permission = String(request.permission ?? "unknown")
   const patterns = Array.isArray(request.patterns) ? request.patterns.map(String) : []
   const requestId = String(request.id ?? "")
 
   const patternsText = patterns.length > 0
-    ? patterns.map(p => `- ${p}`).join("\n")
+    ? patterns.map(p => `- \`${p}\``).join("\n")
     : "（无具体路径）"
 
   const buttons: ButtonInput[] = [
@@ -194,13 +196,13 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string): obj
   ]
 
   const dsl = { title: `🔐 权限请求: ${permission}`, template: "orange", sections }
-  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, "p2p") }
+  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, chatType) }
 }
 
 /**
  * 使用统一 DSL 构建问答选择卡片
  */
-function buildQuestionCardDSL(request: QuestionRequest, chatId: string): object {
+function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group"): object {
   const questions = Array.isArray(request.questions) ? request.questions : []
   const requestId = String(request.id ?? "")
 
@@ -232,5 +234,5 @@ function buildQuestionCardDSL(request: QuestionRequest, chatId: string): object 
   ]
 
   const dsl = { title: header, template: "blue", sections }
-  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, "p2p") }
+  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, chatType) }
 }
