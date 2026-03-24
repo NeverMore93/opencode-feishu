@@ -60,6 +60,10 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
     async execute(args, context) {
       const chatId = getChatIdBySession(context.sessionID)
       if (!chatId) {
+        deps.log("warn", "Agent 卡片发送跳过：sessionID 无飞书聊天映射", {
+          sessionId: context.sessionID,
+          title: args.title,
+        })
         return "错误：当前会话不关联飞书聊天，无法发送卡片"
       }
 
