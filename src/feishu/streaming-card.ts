@@ -22,6 +22,7 @@ export class StreamingCard {
   private textBuffer = ""
   private toolStates = new Map<string, ToolState>()
   private closed = false
+  private toolsElementAdded = false
 
   constructor(
     private readonly cardkit: CardKitClient,
@@ -37,7 +38,7 @@ export class StreamingCard {
     const schema: CardKitSchema = {
       data: {
         schema: "2.0",
-        config: { streaming_mode: true, summary: { content: "正在思考..." } },
+        config: { streaming_mode: true },
         header: {
           title: { tag: "plain_text", content: "AI 回复" },
           template: "blue",
@@ -45,7 +46,6 @@ export class StreamingCard {
         body: {
           elements: [
             { tag: "markdown", element_id: "content", content: "正在思考..." },
-            { tag: "markdown", element_id: "tools", content: "" },
           ],
         },
       },
@@ -152,11 +152,22 @@ export class StreamingCard {
       const icon = ts.state === "completed" ? "✅" : ts.state === "error" ? "❌" : "🔄"
       lines.push(`${icon} ${ts.tool}`)
     }
-    await this.cardkit.updateElement(
-      this.cardId,
-      "tools",
-      lines.join("\n"),
-      ++this.seq,
-    )
+    const content = lines.join("\n")
+
+    if (!this.toolsElementAdded) {
+      this.toolsElementAdded = true
+      await this.cardkit.addElement(
+        this.cardId,
+        [{ tag: "markdown", element_id: "tools", content }],
+        ++this.seq,
+      )
+    } else {
+      await this.cardkit.updateElement(
+        this.cardId,
+        "tools",
+        content,
+        ++this.seq,
+      )
+    }
   }
 }

@@ -101,6 +101,35 @@ export class CardKitClient {
   }
 
   /**
+   * 在卡片末尾追加新组件（用于流式卡片动态添加元素）
+   */
+  async addElement(
+    cardId: string,
+    elements: Array<Record<string, unknown>>,
+    sequence: number,
+  ): Promise<void> {
+    const res = await this.larkClient.cardkit.v1.cardElement.create({
+      data: {
+        type: "append",
+        elements: JSON.stringify(elements),
+        sequence,
+      },
+      path: {
+        card_id: cardId,
+      },
+    })
+
+    if (res?.code !== 0) {
+      this.log?.("warn", "CardKit addElement 失败", {
+        cardId,
+        code: res?.code,
+        msg: res?.msg,
+      })
+      throw new Error(`CardKit addElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
+    }
+  }
+
+  /**
    * 关闭卡片流式模式
    */
   async closeStreaming(cardId: string, sequence: number): Promise<void> {
