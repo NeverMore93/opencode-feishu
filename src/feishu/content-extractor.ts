@@ -234,22 +234,84 @@ function formatDownloadFailure(label: string, result: DownloadResult, maxSize: n
 
 function extractInteractive(rawContent: string): PromptPart[] {
   try {
-    const parsed = JSON.parse(rawContent) as {
-      elements?: Array<{ tag?: string; content?: string; text?: { content?: string } }>
-      header?: { title?: { content?: string } }
-    }
+    const parsed = JSON.parse(rawContent) as Record<string, unknown>
     const texts: string[] = []
-    if (parsed.header?.title?.content) texts.push(parsed.header.title.content)
-    if (Array.isArray(parsed.elements)) {
-      for (const el of parsed.elements) {
-        if (el.tag === "div" && el.text?.content) texts.push(el.text.content)
-        else if (el.tag === "markdown" && el.content) texts.push(el.content)
-      }
+
+    // header title
+    const header = parsed.header as { title?: { content?: string } } | undefined
+    if (header?.title?.content) texts.push(header.title.content)
+
+    // Card 2.0: body.elements; Card 1.0: top-level elements
+    const body = parsed.body as { elements?: unknown[] } | undefined
+    const elements = (body?.elements ?? parsed.elements) as Array<Record<string, unknown>> | undefined
+    if (Array.isArray(elements)) {
+      collectTexts(elements, texts)
     }
+
     const text = texts.join("\n").trim()
     return text ? [{ type: "text", text: `[卡片消息]\n${text}` }] : [{ type: "text", text: "[卡片消息]" }]
   } catch {
     return [{ type: "text", text: "[卡片消息]" }]
+  }
+}
+
+/** 递归提取卡片元素中的文本内容 */
+function collectTexts(elements: Array<Record<string, unknown>>, out: string[]): void {
+  for (const el of elements) {
+    const tag = el.tag as string | undefined
+    if (!tag) continue
+
+    // markdown / plain_text 直接取 content
+    if ((tag === "markdown" || tag === "plain_text") && typeof el.content === "string") {
+      out.push(el.content)
+    }
+    // div 取 text.content
+    else if (tag === "div") {
+      const text = el.text as { content?: string } | undefined
+      if (text?.content) out.push(text.content)
+    }
+    // note 递归 elements
+    else if (tag === "note" && Array.isArray(el.elements)) {
+      collectTexts(el.elements as Array<Record<string, unknown>>, out)
+    }
+    // table: 提取表头和行数据为 markdown 表格
+    else if (tag === "table") {
+      extractTable(el, out)
+    }
+    // column_set / column: 递归子元素
+    else if ((tag === "column_set" || tag === "column") && Array.isArray(el.columns ?? el.elements)) {
+      collectTexts((el.columns ?? el.elements) as Array<Record<string, unknown>>, out)
+    }
+    // action 按钮组: 提取按钮文本
+    else if (tag === "action" && Array.isArray(el.actions)) {
+      for (const btn of el.actions as Array<Record<string, unknown>>) {
+        const btnText = btn.text as { content?: string } | undefined
+        if (btnText?.content) out.push(`[按钮: ${btnText.content}]`)
+      }
+    }
+  }
+}
+
+/** 提取 table 元素为 markdown 表格格式 */
+function extractTable(el: Record<string, unknown>, out: string[]): void {
+  const columns = el.columns as Array<{ name?: string; data_type?: string }> | undefined
+  const rows = el.rows as Array<Record<string, unknown>> | undefined
+  if (!columns?.length) return
+
+  // 表头
+  const headers = columns.map(c => c.name ?? "")
+  out.push("| " + headers.join(" | ") + " |")
+  out.push("| " + headers.map(() => "---").join(" | ") + " |")
+
+  // 行数据
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
+      const cells = headers.map(h => {
+        const val = row[h]
+        return val != null ? String(val) : ""
+      })
+      out.push("| " + cells.join(" | ") + " |")
+    }
   }
 }
 
