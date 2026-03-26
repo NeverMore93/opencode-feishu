@@ -68,7 +68,7 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
       }
 
       const chatInfo = getChatInfoBySession(context.sessionID)
-      const card = { type: "card_kit" as const, data: buildCardFromDSL(args, chatId, chatInfo?.chatType ?? "p2p") }
+      const card = buildCardFromDSL(args, chatId, chatInfo?.chatType ?? "p2p")
       const result = await sendInteractiveCard(deps.feishuClient, chatId, card)
 
       if (result.ok) {

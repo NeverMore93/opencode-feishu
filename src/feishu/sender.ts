@@ -125,7 +125,7 @@ export async function sendCardMessage(
       data: {
         receive_id: chatId.trim(),
         msg_type: "interactive",
-        content: JSON.stringify({ type: "card_kit", data: { card_id: cardId } }),
+        content: JSON.stringify({ type: "card", data: { card_id: cardId } }),
       },
     }),
   )
