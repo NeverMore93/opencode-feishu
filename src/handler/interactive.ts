@@ -196,7 +196,7 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
   ]
 
   const dsl = { title: `🔐 权限请求: ${permission}`, template: "orange", sections }
-  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, chatType) }
+  return buildCardFromDSL(dsl, chatId, chatType)
 }
 
 /**
@@ -228,5 +228,5 @@ function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType
   ]
 
   const dsl = { title: header, template: "blue", sections }
-  return { type: "card_kit", data: buildCardFromDSL(dsl, chatId, chatType) }
+  return buildCardFromDSL(dsl, chatId, chatType)
 }
