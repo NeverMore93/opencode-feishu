@@ -17,12 +17,53 @@ import { subscribe } from "./action-bus.js"
 import type { CardKitClient } from "../feishu/cardkit.js"
 import { StreamingCard } from "../feishu/streaming-card.js"
 import { handlePermissionRequested, handleQuestionRequested, type InteractiveDeps } from "./interactive.js"
+/**
+ * 向 Langfuse 发送轻量 trace，关联 sessionId 和飞书 userId。
+ * Fire-and-forget：不阻塞主流程，失败只记 warn 日志。
+ */
+function traceLangfuseUser(
+  sessionId: string,
+  userId: string,
+  log: LogFn,
+): void {
+  const publicKey = process.env.LANGFUSE_PUBLIC_KEY
+  const secretKey = process.env.LANGFUSE_SECRET_KEY
+  if (!publicKey || !secretKey) return
+
+  const baseUrl = process.env.LANGFUSE_BASEURL ?? "https://cloud.langfuse.com"
+  const auth = Buffer.from(`${publicKey}:${secretKey}`).toString("base64")
+
+  fetch(`${baseUrl}/api/public/ingestion`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      batch: [{
+        type: "trace-create",
+        timestamp: new Date().toISOString(),
+        body: { name: "feishu-message", sessionId, userId },
+      }],
+    }),
+  }).then(async (res) => {
+    if (!res.ok) {
+      const body = await res.text().catch(() => "")
+      log("warn", "Langfuse trace API 失败", { status: res.status, body })
+    }
+  }).catch((err) => {
+    log("warn", "Langfuse trace 网络失败", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
+}
 
 export interface AutoPromptContext {
   readonly sessionId: string
   readonly sessionKey: string
   readonly chatId: string
   readonly deps: ChatDeps
+
 }
 
 export interface ChatDeps {
@@ -76,6 +117,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
   const session = await getOrCreateSession(client, sessionKey, directory)
   registerSessionChat(session.id, chatId, chatType)
+  traceLangfuseUser(session.id, senderId, log)
 
   // 提取消息内容为 OpenCode parts
   const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log, config.maxResourceSize)
@@ -162,20 +204,20 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   let cardUnsub: (() => void) | undefined
   {
     const card = streamingCard
-    cardUnsub = subscribe(activeSessionId, (action) => {
+    cardUnsub = subscribe(activeSessionId, async (action) => {
       switch (action.type) {
         case "text-updated":
           if (card) {
             if (action.delta) {
-              card.updateText(action.delta)
+              await card.updateText(action.delta)
             } else if (action.fullText) {
               // snapshot-style 事件：用 fullText 替换整个 buffer
-              card.replaceText(action.fullText)
+              await card.replaceText(action.fullText)
             }
           }
           break
         case "tool-state-changed":
-          if (card) card.setToolStatus(action.callID, action.tool, action.state)
+          if (card) await card.setToolStatus(action.callID, action.tool, action.state)
           break
         case "permission-requested":
           if (deps.interactiveDeps) {

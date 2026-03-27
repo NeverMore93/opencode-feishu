@@ -162,12 +162,12 @@ export class StreamingCard {
     const content = lines.join("\n")
 
     if (!this.toolsElementAdded) {
-      this.toolsElementAdded = true
       await this.cardkit.addElement(
         this.cardId,
         [{ tag: "markdown", element_id: "tools", content }],
         ++this.seq,
       )
+      this.toolsElementAdded = true
     } else {
       await this.cardkit.updateElement(
         this.cardId,

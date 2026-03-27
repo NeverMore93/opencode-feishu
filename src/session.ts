@@ -2,12 +2,14 @@
  * 共享会话管理：查找或创建 OpenCode 会话
  */
 import type { OpencodeClient } from "@opencode-ai/sdk"
+import { TtlMap } from "./utils/ttl-map.js"
 
 const SESSION_KEY_PREFIX = "feishu"
 const TITLE_PREFIX = "Feishu"
+const SESSION_CACHE_TTL = 60 * 60 * 1_000 // 1 hour
 
-/** 内存会话缓存：sessionKey → { id, title } */
-const sessionCache = new Map<string, { id: string; title?: string }>()
+/** 内存会话缓存：sessionKey → { id, title }，1 小时 TTL 自动清理 */
+const sessionCache = new TtlMap<{ id: string; title?: string }>(SESSION_CACHE_TTL)
 
 function setCachedSession(sessionKey: string, session: { id: string; title?: string }): void {
   sessionCache.set(sessionKey, session)
@@ -74,7 +76,7 @@ export async function getOrCreateSession(
   if (!createResp?.data?.id) {
     const err = (createResp as unknown as { error?: unknown })?.error
     throw new Error(
-      `创建 OpenCode 会话失败: ${err ? JSON.stringify(err) : "unknown"}`,
+      `创建 OpenCode 会话失败: ${err instanceof Error ? err.message : String(err ?? "unknown")}`,
     )
   }
   const session = { id: createResp.data.id, title: createResp.data.title }
