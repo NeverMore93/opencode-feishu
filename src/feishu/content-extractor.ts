@@ -35,7 +35,7 @@ export async function extractParts(
       case "image":
         return await extractImage(feishuClient, messageId, rawContent, log, maxResourceSize)
       case "post":
-        return extractPost(rawContent)
+        return await extractPost(feishuClient, messageId, rawContent, log, maxResourceSize)
       case "file":
         return await extractFile(feishuClient, messageId, rawContent, log, maxResourceSize)
       case "audio":
@@ -137,20 +137,22 @@ async function extractImage(
   return [{ type: "file", mime: result.resource.mime, url: result.resource.dataUrl }]
 }
 
-function extractPost(rawContent: string): PromptPart[] {
-  const text = extractPostText(rawContent)
-  if (!text) return []
-  return [{ type: "text", text }]
-}
-
-function extractPostText(rawContent: string): string {
+async function extractPost(
+  client: InstanceType<typeof Lark.Client>,
+  messageId: string,
+  rawContent: string,
+  log: LogFn,
+  maxResourceSize: number,
+): Promise<PromptPart[]> {
   try {
     const parsed = JSON.parse(rawContent) as {
       title?: string
-      content?: Array<Array<{ tag?: string; text?: string; href?: string }>>
+      content?: Array<Array<{ tag?: string; text?: string; href?: string; image_key?: string }>>
     }
-    const lines: string[] = []
-    if (parsed.title) lines.push(parsed.title)
+    const parts: PromptPart[] = []
+    const textLines: string[] = []
+
+    if (parsed.title) textLines.push(parsed.title)
 
     if (Array.isArray(parsed.content)) {
       for (const paragraph of parsed.content) {
@@ -163,9 +165,60 @@ function extractPostText(rawContent: string): string {
             segments.push(element.href ? `${element.text}(${element.href})` : element.text)
           } else if (element.tag === "at" && element.text) {
             segments.push(element.text)
+          } else if (element.tag === "img" && element.image_key) {
+            // 先把之前积累的文本作为一个 text part
+            if (segments.length) {
+              textLines.push(segments.join(""))
+              segments.length = 0
+            }
+            if (textLines.length) {
+              parts.push({ type: "text", text: textLines.join("\n") })
+              textLines.length = 0
+            }
+            // 下载内嵌图片
+            const result = await downloadMessageResource(client, messageId, element.image_key, "image", log, maxResourceSize)
+            if (result.resource) {
+              parts.push({ type: "file", mime: result.resource.mime, url: result.resource.dataUrl })
+            } else {
+              parts.push({ type: "text", text: formatDownloadFailure("富文本图片", result, maxResourceSize) })
+            }
           } else if (element.tag === "img") {
             segments.push("[图片]")
           }
+        }
+        if (segments.length) textLines.push(segments.join(""))
+      }
+    }
+
+    // 剩余文本
+    if (textLines.length) {
+      parts.push({ type: "text", text: textLines.join("\n").trim() })
+    }
+
+    return parts.length ? parts : []
+  } catch {
+    return []
+  }
+}
+
+/** 纯文本提取（用于 describeMessageType 和 history） */
+function extractPostText(rawContent: string): string {
+  try {
+    const parsed = JSON.parse(rawContent) as {
+      title?: string
+      content?: Array<Array<{ tag?: string; text?: string; href?: string }>>
+    }
+    const lines: string[] = []
+    if (parsed.title) lines.push(parsed.title)
+    if (Array.isArray(parsed.content)) {
+      for (const paragraph of parsed.content) {
+        if (!Array.isArray(paragraph)) continue
+        const segments: string[] = []
+        for (const element of paragraph) {
+          if (element.tag === "text" && element.text) segments.push(element.text)
+          else if (element.tag === "a" && element.text) segments.push(element.href ? `${element.text}(${element.href})` : element.text)
+          else if (element.tag === "at" && element.text) segments.push(element.text)
+          else if (element.tag === "img") segments.push("[图片]")
         }
         if (segments.length) lines.push(segments.join(""))
       }

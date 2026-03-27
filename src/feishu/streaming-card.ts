@@ -119,13 +119,6 @@ export class StreamingCard {
     }
   }
 
-  /**
-   * 中断卡片：追加中断标记并关闭流式模式
-   */
-  async abort(): Promise<void> {
-    await this.close(this.textBuffer + "\n\n⏹ 已中断")
-  }
-
   get currentMessageId(): string | undefined {
     return this.messageId
   }

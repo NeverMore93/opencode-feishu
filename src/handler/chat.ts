@@ -93,35 +93,6 @@ async function finalizeReply(
   }
 }
 
-/** 发送完成通知（触发手机推送） */
-function sendCompletionNotify(
-  feishuClient: InstanceType<typeof Lark.Client>,
-  chatId: string,
-  config: ResolvedConfig,
-  log: LogFn,
-): void {
-  if (!config.completionNotify) return
-  sender.sendTextMessage(feishuClient, chatId, "✅ 回复已完成").catch((err) => {
-    log("warn", "完成通知发送失败", {
-      error: err instanceof Error ? err.message : String(err),
-    })
-  })
-}
-
-const ABORT_LABEL = "⏹ 已中断"
-
-/** 中断清理：更新流式卡片或占位消息为已中断状态 */
-async function abortCleanup(
-  streamingCard: StreamingCard | undefined,
-  feishuClient: InstanceType<typeof Lark.Client>,
-  placeholderId: string,
-): Promise<void> {
-  if (streamingCard) {
-    await streamingCard.abort().catch(() => {})
-  } else if (placeholderId) {
-    await sender.updateMessage(feishuClient, placeholderId, ABORT_LABEL).catch(() => {})
-  }
-}
 
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<AutoPromptContext | undefined> {
   const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId, parentId } = ctx
@@ -273,22 +244,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
-    if (streamingCard) {
-      sendCompletionNotify(feishuClient, chatId, config, log)
-    }
 
     if (config.autoPrompt.enabled && shouldReply) {
       return { sessionId: session.id, sessionKey, chatId, deps }
     }
     return undefined
   } catch (err) {
-    // AbortError = 被新消息中断，清理占位消息后静默退出
-    if (err instanceof Error && err.name === "AbortError") {
-      log("info", "处理被中断", { sessionKey, sessionId: session.id })
-      await abortCleanup(streamingCard, feishuClient, placeholderId)
-      return undefined
-    }
-
     // 提取会话错误信息（来自 SessionErrorDetected 或 SSE 缓存）
     const sessionError = extractSessionError(err, session.id)
     let displayError = sessionError
@@ -304,9 +265,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
         if (recovery.recovered) {
           await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, recovery.text || "⚠️ 响应超时")
-          if (streamingCard) {
-            sendCompletionNotify(feishuClient, chatId, config, log)
-          }
           if (config.autoPrompt.enabled && shouldReply) {
             return { sessionId: session.id, sessionKey, chatId, deps }
           }
@@ -314,11 +272,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
         }
         displayError = recovery.sessionError
       } catch (abortErr) {
-        if (abortErr instanceof Error && abortErr.name === "AbortError") {
-          log("info", "模型恢复被中断", { sessionKey })
-          await abortCleanup(streamingCard, feishuClient, placeholderId)
-          return undefined
-        }
         throw abortErr
       }
     }
