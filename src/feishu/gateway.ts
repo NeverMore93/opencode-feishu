@@ -95,6 +95,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         const sender = (data as { sender?: { sender_id?: { open_id?: string } } }).sender
         const senderId = sender?.sender_id?.open_id ?? ""
         const rootId = message.root_id as string | undefined
+        const parentId = message.parent_id as string | undefined
         const createTime = message.create_time as string | undefined
 
         const ctx: FeishuMessageContext = {
@@ -106,6 +107,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           chatType,
           senderId,
           rootId,
+          parentId,
           createTime,
           shouldReply,
         }

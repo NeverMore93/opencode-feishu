@@ -14,6 +14,7 @@ export interface FeishuMessageContext {
   chatType: "p2p" | "group"
   senderId: string
   rootId?: string
+  parentId?: string
   /** 消息创建时间（毫秒时间戳字符串，来自飞书 create_time 字段） */
   createTime?: string
   /** false = 静默监听：消息转发给 OpenCode 但不在飞书回复（群聊未被 @提及时） */
@@ -41,6 +42,8 @@ export interface FeishuPluginConfig {
   maxResourceSize?: number
   /** 默认工作目录（覆盖 OpenCode 插件上下文的 directory） */
   directory?: string
+  /** 流式卡片完成后发送通知消息触发手机推送（默认 true） */
+  completionNotify?: boolean
   /** 自动提示配置：响应完成后自动发送"继续"推动 OpenCode 持续工作 */
   autoPrompt?: {
     enabled?: boolean
@@ -73,6 +76,7 @@ export const FeishuConfigSchema = z.object({
   dedupTtl: z.number().int().positive().default(10 * 60 * 1_000),
   maxResourceSize: z.number().int().positive().max(500 * 1024 * 1024).default(500 * 1024 * 1024),
   directory: z.string().optional(),
+  completionNotify: z.boolean().default(true),
   autoPrompt: AutoPromptSchema.default(() => AutoPromptSchema.parse({})),
 })
 

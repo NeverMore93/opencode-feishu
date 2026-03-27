@@ -12,6 +12,8 @@ import { SessionErrorDetected, extractSessionError, tryModelRecovery } from "./e
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { registerSessionChat } from "../feishu/session-chat-map.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
+import { resolveUserName } from "../feishu/user-name.js"
+import { fetchQuotedMessage } from "../feishu/quote.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import { subscribe } from "./action-bus.js"
 import type { CardKitClient } from "../feishu/cardkit.js"
@@ -91,6 +93,21 @@ async function finalizeReply(
   }
 }
 
+/** 发送完成通知（触发手机推送） */
+function sendCompletionNotify(
+  feishuClient: InstanceType<typeof Lark.Client>,
+  chatId: string,
+  config: ResolvedConfig,
+  log: LogFn,
+): void {
+  if (!config.completionNotify) return
+  sender.sendTextMessage(feishuClient, chatId, "✅ 回复已完成").catch((err) => {
+    log("warn", "完成通知发送失败", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
+}
+
 const ABORT_LABEL = "⏹ 已中断"
 
 /** 中断清理：更新流式卡片或占位消息为已中断状态 */
@@ -107,7 +124,7 @@ async function abortCleanup(
 }
 
 export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<AutoPromptContext | undefined> {
-  const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId } = ctx
+  const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId, parentId } = ctx
   if (!content.trim() && messageType === "text") return undefined
 
   const { config, client, feishuClient, log, directory } = deps
@@ -120,7 +137,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   traceLangfuseUser(session.id, senderId, log)
 
   // 提取消息内容为 OpenCode parts
-  const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log, config.maxResourceSize)
+  const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log, config.maxResourceSize, parentId)
   if (!parts.length) return undefined
 
   log("info", "收到用户消息", {
@@ -256,6 +273,10 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
 
+    if (streamingCard) {
+      sendCompletionNotify(feishuClient, chatId, config, log)
+    }
+
     if (config.autoPrompt.enabled && shouldReply) {
       return { sessionId: session.id, sessionKey, chatId, deps }
     }
@@ -283,6 +304,9 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
         if (recovery.recovered) {
           await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, recovery.text || "⚠️ 响应超时")
+          if (streamingCard) {
+            sendCompletionNotify(feishuClient, chatId, config, log)
+          }
           if (config.autoPrompt.enabled && shouldReply) {
             return { sessionId: session.id, sessionKey, chatId, deps }
           }
@@ -330,14 +354,25 @@ async function buildPromptParts(
   senderId: string,
   log: LogFn,
   maxResourceSize: number,
+  parentId?: string,
 ): Promise<PromptPart[]> {
+  // 引用消息前缀：如果是回复消息，获取被引用内容
+  let quotePrefix = ""
+  if (parentId) {
+    const quoted = await fetchQuotedMessage(feishuClient, parentId, log)
+    if (quoted) {
+      quotePrefix = `[回复消息]: ${quoted}\n---\n`
+    }
+  }
+
   if (messageType === "text") {
     // 文本消息：沿用原有逻辑，群聊添加发送者前缀
     let promptText = textContent
     if (chatType === "group" && senderId) {
-      promptText = `[${senderId}]: ${textContent}`
+      const senderName = await resolveUserName(feishuClient, senderId, log)
+      promptText = `[${senderName}]: ${textContent}`
     }
-    return [{ type: "text", text: promptText }]
+    return [{ type: "text", text: quotePrefix + promptText }]
   }
 
   // 非文本消息：通过 content-extractor 提取
@@ -345,7 +380,15 @@ async function buildPromptParts(
 
   // 群聊非文本消息：在 parts 前添加发送者前缀
   if (chatType === "group" && senderId && parts.length > 0) {
-    return [{ type: "text", text: `[${senderId}]:` }, ...parts]
+    const senderName = await resolveUserName(feishuClient, senderId, log)
+    const prefixParts: PromptPart[] = quotePrefix
+      ? [{ type: "text", text: quotePrefix + `[${senderName}]:` }]
+      : [{ type: "text", text: `[${senderName}]:` }]
+    return [...prefixParts, ...parts]
+  }
+
+  if (quotePrefix && parts.length > 0) {
+    return [{ type: "text", text: quotePrefix }, ...parts]
   }
 
   return parts
