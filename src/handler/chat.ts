@@ -46,8 +46,13 @@ function traceLangfuseUser(
         body: { name: "feishu-message", sessionId, userId },
       }],
     }),
+  }).then(async (res) => {
+    if (!res.ok) {
+      const body = await res.text().catch(() => "")
+      log("warn", "Langfuse trace API 失败", { status: res.status, body })
+    }
   }).catch((err) => {
-    log("warn", "Langfuse trace 发送失败", {
+    log("warn", "Langfuse trace 网络失败", {
       error: err instanceof Error ? err.message : String(err),
     })
   })
