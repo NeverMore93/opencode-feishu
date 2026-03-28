@@ -1,9 +1,13 @@
 <!--
 Sync Impact Report
 ==================
-- Version change: 2.5.0 → 2.6.0 (MINOR)
-- Modified principles: None
-- Added sections: 十三（飞书卡片规范）— 引用官方 CardKit API 文档
+- Version change: 2.6.0 → 3.0.0 (MAJOR)
+- Modified principles:
+  - 四（配置管理）: autoPrompt → nudge 配置
+  - 十一（自动提示）→ 十一（session.idle 催促）: 定时循环 → 事件驱动 + skill 指导
+  - 十二（发布流程）: 新增"未经允许禁止 commit/push/发布"约束
+- Added sections:
+  - 十四（变更审批）: 禁止未经允许的 commit/push/发布
 - Removed sections: None
 - Templates requiring updates: None
 - Follow-up TODOs: None
@@ -41,19 +45,22 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 必需配置：`appId`、`appSecret`（在 `~/.config/opencode/plugins/feishu.json` 中声明）
 - 插件声明：在 `opencode.json` 的 `"plugin"` 字段中列出 `"opencode-feishu"`
 - 可选配置：`timeout`、`thinkingDelay`、`logLevel`、`maxHistoryMessages`、
-  `pollInterval`、`stablePolls`、`dedupTtl`、`directory`
-- 自动提示配置：`autoPrompt` 对象（`enabled`、`intervalSeconds`、
-  `maxIterations`、`message`、`idleThreshold`、`idleMaxLength`），默认关闭
+  `pollInterval`、`stablePolls`、`dedupTtl`、`maxResourceSize`、`directory`
+- 催促配置：`nudge` 对象（`enabled`、`message`、`intervalSeconds`、`maxIterations`），
+  默认关闭。由 session.idle 事件驱动，非定时轮询
+- 配置类型：`FeishuPluginConfig`（z.input 推导）描述 JSON 输入，
+  `ResolvedConfig`（z.infer 推导）描述运行时类型，两者自动与 Zod schema 同步
 
 ### 五、消息处理
 - 纯中继模式：所有消息原样转发给 OpenCode
 - 不解析命令、不选择模型、不做业务逻辑处理
 - 群聊静默监听：未被 @提及时只转发上下文，不触发回复
+- P2P 和群聊统一使用 FIFO 串行队列，消息按顺序处理不互相中断
 
 ### 六、会话管理
 - 会话键格式：`feishu-p2p-<userId>` 或 `feishu-group-<chatId>`
 - 会话标题格式：`Feishu-<sessionKey>-<timestamp>`
-- 24 小时内存缓存，支持进程重启后按标题前缀恢复
+- TtlMap 1 小时内存缓存，过期后重新查找（按标题前缀匹配）
 
 ## 技术标准
 
@@ -76,10 +83,9 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 超时保护：默认 120 秒请求超时
 - 最佳努力：占位消息更新失败时 fallback 到发送新消息
 - 日志静默：`client.app.log()` 失败通过 `.catch(() => {})` 静默处理
-- 会话错误四层架构：L1 错误提取（SSE 事件）→ L2 轮询 SSE 检测（pollForResponse 每次 poll 检查 sessionError）→ L3 全局默认模型恢复（`client.config.get()` 读取 Config.model）→ L4 竞态协调（SessionErrorDetected 或 100ms 窗口）
-- 轮询 SSE 错误检测：`pollForResponse()` 每次 poll 周期检查 `getSessionError()`，检测到错误时抛出 `SessionErrorDetected` 异常立即终止（~1 秒而非 120 秒超时）
-- 恢复策略：只用全局配置默认模型（`Config.model`，如 `aigw/claude-opus-4-6-v1`），不在失败 provider 内搜索替代模型
-- 重试安全防护：每 sessionKey 最多重试 2 次，成功后重置；全局默认模型未配置时直接显示错误
+- 会话错误架构：L1 错误提取（SSE 事件）→ L2 轮询 SSE 检测 → L3 全局默认模型恢复 → L4 统一错误出口
+- 恢复策略：只用全局配置默认模型，不在失败 provider 内搜索替代模型
+- 重试安全防护：每 sessionKey 最多重试 2 次，成功后重置
 - 错误消息统一出口：chat.ts catch 块负责向用户发送，event.ts 只缓存不发送
 
 ### 十、Infrastructure as Code
@@ -89,31 +95,47 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 - 依赖版本锁定（package-lock.json / bun.lock）
 - 构建和发布流程可通过命令行完成（npm run build / npm publish）
 
-### 十一、自动提示
-响应完成后自动发送"继续"推动 OpenCode 持续工作，实现主动式交互。
-- 空闲检测：通过简单的文本长度 + 关键词匹配（`isIdleResponse`）识别空闲响应，
-  连续空闲次数达到 `idleThreshold` 时自动退出循环
-- 安全兜底：`maxIterations` 限制防止无限循环
-- 用户优先：用户发送新消息时立即中断自动提示循环（P2P 通过 abort，群聊通过队列检查）
-- 仅在主动回复模式（shouldReply）下触发，静默监听不触发
-- 各会话独立计数，互不干扰
+### 十一、session.idle 催促
+AI 工具调用后停止时，通过 session.idle 事件按需催促继续，替代旧的定时轮询。
+- 事件驱动：监听 OpenCode 的 `session.idle` SSE 事件，非定时循环
+- 按需催促：检查最后一条 AI 消息是否以工具调用结尾，是则发送催促消息
+- 次数限制：`nudge.maxIterations`（默认 3 次），用户新消息后重置
+- 间隔保护：`nudge.intervalSeconds`（默认 30 秒），防止频繁催促
+- 消息可配置：`nudge.message` 字段自定义催促内容
+- Skill 指导优先：`feishu-card-interaction.md` 的"自主工作模式"指导 AI 主动继续，催促是兜底
 
 ### 十二、发布流程
 任何代码变更 MUST 先更新 `package.json` 版本号再发布。
 - 版本号遵循 semver：feat → minor，fix → patch，breaking → major
 - 发布步骤：bump 版本 → commit → tag `v*` → push → GitHub Actions 自动发布
 - 推荐使用 `npm run release`（bumpp 交互式选版本 + 自动 git 操作）
-- main 分支受保护，所有变更 MUST 通过 PR 合并（release commit 除外）
-- Gemini Code Assist 作为 PR reviewer 自动触发
+- main 分支受保护，所有变更 MUST 通过 PR 合并
+- Gemini Code Assist + CodeRabbit 作为 PR 双 reviewer
 
 ### 十三、飞书卡片规范
 飞书卡片相关开发 MUST 遵循飞书开放平台官方文档。
-- CardKit 2.0 创建卡片 API：https://open.larkenterprise.com/document/cardkit-v1/card/create?appId=cli_a90943a30978dbcb
-- API 参数（如 `type` 字段的合法值 `card_json` / `template`）以官方文档为准，
-  不得使用未文档化的值
-- 卡片 JSON schema、元素更新、流式模式等均参照 CardKit 2.0 官方指南
-- 发送消息时的 `msg_type` / content `type` 与创建卡片 API 的 `type` 含义不同，
-  MUST 区分使用场景
+- 使用 Card 2.0 格式（schema: "2.0"），不使用 Card 1.0 标签
+- 内联卡片（im.message.create）直接发送 Card 2.0 JSON，无 wrapper
+- 卡片实体引用使用 `{ type: "card", data: { card_id: "..." } }`
+- `feishu_send_card` tool 支持 22 种 Card 2.0 组件
+- 所有组件 MUST 有空值防护（缺少必要数据时返回空数组而非空字符串）
+
+### 十四、变更审批
+**未经用户明确允许，禁止执行以下操作：**
+- `git commit` — 不得自行提交代码
+- `git push` — 不得自行推送到远端
+- `npm publish` / `git tag` — 不得自行发布版本
+- `gh pr merge` — 不得自行合并 PR
+
+**允许的操作**（无需额外确认）：
+- 代码编辑（Edit/Write）
+- `npm run build` / `npm run typecheck` — 构建和类型检查
+- `git diff` / `git status` / `git log` — 只读 git 操作
+- 创建分支（`git checkout -b`）
+- `gh pr create` — 创建 PR（不合并）
+- `gh api` — 触发 review bot 或查看评论
+
+**原则**：所有不可逆的共享状态变更（commit/push/merge/publish）MUST 等待用户确认。
 
 ## 治理规则
 
@@ -121,4 +143,4 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 
 所有代码变更和文档修改必须符合本约定。
 
-**版本**: 2.6.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-12
+**版本**: 3.0.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-28

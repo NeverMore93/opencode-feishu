@@ -1,6 +1,6 @@
 {
   "name": "opencode-feishu",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "OpenCode 飞书插件 — 通过飞书 WebSocket 长连接接入 OpenCode AI 对话",
   "type": "module",
   "main": "dist/index.js",
