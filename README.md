@@ -78,7 +78,7 @@ opencode
 | `nudge.enabled` | boolean | 否 | `false` | 启用 session.idle 催促（AI 工具调用后停止时自动发送催促消息） |
 | `nudge.intervalSeconds` | number | 否 | `30` | 同一 session 连续催促的最小间隔（秒） |
 | `nudge.maxIterations` | number | 否 | `3` | 同一 session 最大催促次数（用户新消息后重置） |
-| `nudge.message` | string | 否 | `"上一步操作已完成..."` | 催促消息内容 |
+| `nudge.message` | string | 否 | `"上一步操作已完成。请继续执行下一步..."` | 催促消息内容 |
 
 ## 特性
 
