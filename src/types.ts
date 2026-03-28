@@ -40,27 +40,11 @@ export interface FeishuPluginConfig {
   dedupTtl?: number
   /** 单个资源最大下载大小（字节，默认 500MB） */
   maxResourceSize?: number
+  /** session.idle 后检测工具调用停止时自动催促一次（默认 false） */
+  nudgeOnIdle?: boolean
   /** 默认工作目录（覆盖 OpenCode 插件上下文的 directory） */
   directory?: string
-  /** 自动提示配置：响应完成后自动发送"继续"推动 OpenCode 持续工作 */
-  autoPrompt?: {
-    enabled?: boolean
-    intervalSeconds?: number
-    maxIterations?: number
-    message?: string
-    idleThreshold?: number
-    idleMaxLength?: number
-  }
 }
-
-const AutoPromptSchema = z.object({
-  enabled: z.boolean().default(false),
-  intervalSeconds: z.number().int().positive().max(300).default(30),
-  maxIterations: z.number().int().positive().max(100).default(10),
-  message: z.string().min(1).default("请同步当前进度，如需帮助请说明"),
-  idleThreshold: z.number().int().min(1).default(2),
-  idleMaxLength: z.number().int().min(10).default(50),
-})
 
 export const FeishuConfigSchema = z.object({
   appId: z.string().min(1, "appId 不能为空"),
@@ -73,8 +57,8 @@ export const FeishuConfigSchema = z.object({
   stablePolls: z.number().int().positive().default(3),
   dedupTtl: z.number().int().positive().default(10 * 60 * 1_000),
   maxResourceSize: z.number().int().positive().max(500 * 1024 * 1024).default(500 * 1024 * 1024),
+  nudgeOnIdle: z.boolean().default(false),
   directory: z.string().optional(),
-  autoPrompt: AutoPromptSchema.default(() => AutoPromptSchema.parse({})),
 })
 
 /**

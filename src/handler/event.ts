@@ -21,6 +21,8 @@ export interface PendingReplyPayload {
 export interface EventDeps {
   log: LogFn
   directory: string
+  client: import("@opencode-ai/sdk").OpencodeClient
+  nudgeOnIdle: boolean
 }
 
 const pendingBySession = new Map<string, PendingReplyPayload>()
@@ -283,6 +285,56 @@ function handleV2Event(event: Event, deps: EventDeps): void {
     emit(evtSessionId, {
       type: "session-idle",
       sessionId: evtSessionId,
+    })
+    // 按需催促：检查最后一条 AI 消息是否以工具调用结尾（AI 可能卡住了）
+    nudgeIfToolIdle(evtSessionId, deps).catch(() => {})
+  }
+}
+
+/** 已催促的 session 集合（防止重复催促，用户新消息时由 handleChat 清理） */
+const nudgedSessions = new Set<string>()
+
+export function clearNudge(sessionId: string): void {
+  nudgedSessions.delete(sessionId)
+}
+
+/**
+ * session.idle 时检查最后一条 AI 消息：如果以工具调用结尾，发一次 "继续"。
+ * 仅催促一次（直到下一条用户消息重置）。
+ */
+async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void> {
+  if (!deps.nudgeOnIdle) return
+  if (nudgedSessions.has(sessionId)) return
+
+  const { client, log, directory } = deps
+  const query = directory ? { directory } : undefined
+
+  try {
+    const resp = await client.session.messages({ path: { id: sessionId }, query })
+    const messages = resp?.data
+    if (!Array.isArray(messages) || messages.length === 0) return
+
+    // 找最后一条 assistant 消息
+    const lastAssistant = [...messages].reverse().find(m => m.info?.role === "assistant")
+    if (!lastAssistant?.parts?.length) return
+
+    // 检查最后一个 part 是否是 tool 类型
+    const lastPart = lastAssistant.parts[lastAssistant.parts.length - 1]
+    if (lastPart.type !== "tool") return
+
+    // AI 以工具调用结尾后 idle — 可能需要催促
+    nudgedSessions.add(sessionId)
+    log("info", "session.idle 检测到工具调用后停止，发送催促", { sessionId })
+
+    await client.session.promptAsync({
+      path: { id: sessionId },
+      query,
+      body: { parts: [{ type: "text", text: "继续" }] },
+    })
+  } catch (err) {
+    log("warn", "session.idle 催促失败", {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
     })
   }
 }

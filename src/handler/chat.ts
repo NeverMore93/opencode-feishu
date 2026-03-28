@@ -7,6 +7,7 @@ import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
   getSessionError, clearSessionError, clearRetryAttempts,
+  clearNudge,
 } from "./event.js"
 import { SessionErrorDetected, extractSessionError, tryModelRecovery } from "./error-recovery.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
@@ -60,13 +61,6 @@ function traceLangfuseUser(
   })
 }
 
-export interface AutoPromptContext {
-  readonly sessionId: string
-  readonly sessionKey: string
-  readonly chatId: string
-  readonly deps: ChatDeps
-
-}
 
 export interface ChatDeps {
   config: ResolvedConfig
@@ -94,7 +88,7 @@ async function finalizeReply(
 }
 
 
-export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<AutoPromptContext | undefined> {
+export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, signal?: AbortSignal): Promise<void> {
   const { content, chatId, chatType, senderId, shouldReply, messageType, rawContent, messageId, parentId } = ctx
   if (!content.trim() && messageType === "text") return undefined
 
@@ -106,6 +100,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   const session = await getOrCreateSession(client, sessionKey, directory)
   registerSessionChat(session.id, chatId, chatType)
   traceLangfuseUser(session.id, senderId, log)
+  clearNudge(session.id)
 
   // 提取消息内容为 OpenCode parts
   const parts = await buildPromptParts(feishuClient, messageId, messageType, rawContent, content, chatType, senderId, log, config.maxResourceSize, parentId)
@@ -243,12 +238,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     clearRetryAttempts(sessionKey)
 
     await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时")
-
-
-    if (config.autoPrompt.enabled && shouldReply) {
-      return { sessionId: session.id, sessionKey, chatId, deps }
-    }
-    return undefined
   } catch (err) {
     // 提取会话错误信息（来自 SessionErrorDetected 或 SSE 缓存）
     const sessionError = extractSessionError(err, session.id)
@@ -265,10 +254,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
         if (recovery.recovered) {
           await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, recovery.text || "⚠️ 响应超时")
-          if (config.autoPrompt.enabled && shouldReply) {
-            return { sessionId: session.id, sessionKey, chatId, deps }
-          }
-          return undefined
+          return
         }
         displayError = recovery.sessionError
       } catch (abortErr) {
@@ -428,58 +414,6 @@ async function replyOrUpdate(
   } else {
     await sender.sendTextMessage(feishuClient, chatId, text)
   }
-}
-
-const idlePatterns = [
-  /^(无|没有)(任务|变化|进行中)/,
-  /空闲|闲置|等待(指令|中|新|你)/,
-  /随时可(开始|开始新)/,
-  /等你指令/,
-]
-
-/**
- * 检测 AI 响应文本是否表示空闲状态（无进行中任务）
- */
-export function isIdleResponse(text: string, maxLength: number = 50): boolean {
-  if (text.length >= maxLength) return false
-  return idlePatterns.some(p => p.test(text))
-}
-
-/**
- * 执行一轮自动提示迭代：发送提示、等待响应、发送到飞书（空闲响应不发送）
- */
-export async function runOneAutoPromptIteration(
-  apCtx: AutoPromptContext,
-  iteration: number,
-  signal?: AbortSignal,
-): Promise<{ text: string | null; isIdle: boolean }> {
-  const { sessionId, chatId, deps } = apCtx
-  const { config, client, feishuClient, log, directory } = deps
-  const query = directory ? { directory } : undefined
-  const { autoPrompt, timeout, pollInterval, stablePolls } = config
-
-  log("info", "发送自动提示", { sessionKey: apCtx.sessionKey, iteration })
-
-  clearSessionError(sessionId)
-  await client.session.promptAsync({
-    path: { id: sessionId },
-    query,
-    body: { parts: [{ type: "text", text: autoPrompt.message }] },
-  })
-
-  const text = await pollForResponse(client, sessionId, {
-    timeout, pollInterval, stablePolls, query, signal,
-  })
-
-  if (!text) return { text: null, isIdle: false }
-
-  const idle = isIdleResponse(text, autoPrompt.idleMaxLength)
-  if (!idle) {
-    log("info", "自动提示响应", { sessionKey: apCtx.sessionKey, iteration, output: text })
-    await sender.sendTextMessage(feishuClient, chatId, text)
-  }
-
-  return { text, isIdle: idle }
 }
 
 /**
