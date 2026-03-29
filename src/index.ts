@@ -143,6 +143,16 @@ export const FeishuPlugin: Plugin = async (ctx) => {
       // 仅在飞书会话中注入提示，非飞书会话不干扰 agent
       if (!input.sessionID || !getChatIdBySession(input.sessionID)) return
       output.system.push(feishuSystemPrompt)
+
+      // 注入运行时上下文（工作目录 + 当前模型）
+      const runtimeLines = [`当前工作目录: ${resolvedConfig.directory || ctx.directory || "未设置"}`]
+      try {
+        const cfg = await client.config.get({ query: { directory: resolvedConfig.directory || undefined } })
+        if (cfg?.data?.model) runtimeLines.push(`当前模型: ${cfg.data.model}`)
+      } catch (err) {
+        log("warn", "获取 config 失败", { error: err instanceof Error ? err.message : String(err) })
+      }
+      output.system.push(runtimeLines.join("\n"))
     },
   }
   return hooks
