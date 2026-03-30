@@ -138,12 +138,12 @@
   "title": "🔍 [分析主题]",
   "template": "blue",
   "sections": [
-    { "type": "markdown", "content": "**结论：** [一句话结论]\n\n**分析依据：**\n1. [依据 1]\n2. [依据 2]\n\n**建议操作：**\n1. [短期操作]\n2. [根治操作]" },
+    { "type": "markdown", "content": "**结论：** [一句话结论]\n\n**分析依据：**\n1. [依据 1]\n2. [依据 2]\n\n**建议操作：**\n1. [短期操作]\n2. [根治操作]\n3. [深入分析方向]" },
     { "type": "divider" },
     { "type": "actions", "buttons": [
       { "text": "执行建议1", "value": "[建议1的完整指令，像用户自己输入一样]", "style": "primary" },
       { "text": "执行建议2", "value": "[建议2的完整指令]", "style": "default" },
-      { "text": "深入分析", "value": "[进一步分析的具体指令]", "style": "default" }
+      { "text": "深入分析", "value": "[建议3的完整指令]", "style": "default" }
     ]}
   ]
 }
