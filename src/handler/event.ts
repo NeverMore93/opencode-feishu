@@ -334,7 +334,7 @@ async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void
     await client.session.promptAsync({
       path: { id: sessionId },
       query,
-      body: { parts: [{ type: "text" as const, text: deps.nudge.message, synthetic: true }] },
+      body: { parts: [{ type: "text", text: deps.nudge.message, synthetic: true } as const] },
     })
   } catch (err) {
     log("warn", "session.idle 催促失败", {
