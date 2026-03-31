@@ -62,6 +62,14 @@ function traceLangfuseUser(
 }
 
 
+async function fetchModel(client: OpencodeClient, query?: { directory?: string }): Promise<string | undefined> {
+  try {
+    const cfg = await client.config.get({ query })
+    const m = cfg?.data?.model
+    return typeof m === "string" ? m : undefined
+  } catch { return undefined }
+}
+
 export interface ChatDeps {
   config: ResolvedConfig
   client: OpencodeClient
@@ -148,7 +156,11 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   // 尝试创建流式卡片（fallback 到纯文本占位）
   if (thinkingDelay > 0 && deps.cardkit) {
     try {
-      streamingCard = new StreamingCard(deps.cardkit, feishuClient, chatId, log)
+      streamingCard = new StreamingCard(deps.cardkit, feishuClient, chatId, log, {
+        sessionId: session.id,
+        directory,
+        model: await fetchModel(client, query),
+      })
       placeholderId = await streamingCard.start()
     } catch (err) {
       log("warn", "CardKit 创建失败，回退纯文本", {

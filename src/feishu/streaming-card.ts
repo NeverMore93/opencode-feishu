@@ -14,6 +14,12 @@ interface ToolState {
   title?: string
 }
 
+export interface StreamingCardMeta {
+  sessionId?: string
+  directory?: string
+  model?: string
+}
+
 export class StreamingCard {
   private cardId?: string
   private messageId?: string
@@ -29,12 +35,15 @@ export class StreamingCard {
     private readonly feishuClient: InstanceType<typeof Lark.Client>,
     private readonly chatId: string,
     private readonly log: LogFn,
+    private readonly meta?: StreamingCardMeta,
   ) {}
 
   /**
    * 创建卡片 + 发送 interactive 消息 → messageId
    */
   async start(): Promise<string> {
+    const footer = [this.meta?.sessionId, this.meta?.directory, this.meta?.model].filter(Boolean).join(" | ")
+
     const schema: CardKitSchema = {
       data: {
         schema: "2.0",
@@ -46,6 +55,7 @@ export class StreamingCard {
         body: {
           elements: [
             { tag: "markdown", element_id: "content", content: "正在思考..." },
+            ...(footer ? [{ tag: "div", text: { tag: "plain_text", content: footer } }] : []),
           ],
         },
       },
