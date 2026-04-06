@@ -291,8 +291,8 @@ function handleV2Event(event: Event, deps: EventDeps): void {
   }
 }
 
-/** 催促计数器：sessionId → { count, lastTime }（用户新消息时清理） */
-const nudgeState = new Map<string, { count: number; lastTime: number }>()
+/** 催促计数器：sessionId → { count, lastTime }（用户新消息时清理，1h TTL 防止泄漏） */
+const nudgeState = new TtlMap<{ count: number; lastTime: number }>(60 * 60 * 1_000)
 
 export function clearNudge(sessionId: string): void {
   nudgeState.delete(sessionId)
