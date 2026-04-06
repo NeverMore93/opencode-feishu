@@ -255,7 +255,8 @@ async function extractFile(
     return [{ type: "text", text: formatDownloadFailure(fileName, result, maxResourceSize) }]
   }
 
-  const finalMime = isTextualMime(result.resource.mime || mime) ? "text/plain" : (result.resource.mime || mime)
+  const detectedMime = result.resource.mime === "application/octet-stream" ? mime : (result.resource.mime || mime)
+  const finalMime = isTextualMime(detectedMime) ? "text/plain" : detectedMime
   return [{ type: "file", mime: finalMime, url: result.resource.dataUrl, filename: fileName }]
 }
 
