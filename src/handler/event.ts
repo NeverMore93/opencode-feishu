@@ -181,11 +181,11 @@ async function handleMessagePartUpdated(
   // Emit tool-state-changed for tool parts (skip text-updated — tool parts have no text content)
   if (part.type === "tool") {
     const p = part as Record<string, unknown>
-    const toolName = String(p.toolName ?? p.name ?? "unknown")
-    const callID = String(p.toolCallID ?? p.id ?? "")
-    const hasError = p.error !== undefined && p.error !== null
-    const rawState = p.state != null ? String(p.state) : (hasError ? "error" : "running")
-    const toolState: "running" | "completed" | "error" = (rawState === "completed" || rawState === "error") ? rawState : "running"
+    const toolName = String(p.tool ?? "unknown")
+    const callID = String(p.callID ?? "")
+    const stateObj = p.state as { status?: string } | undefined
+    const rawStatus = stateObj?.status ?? (p.error != null ? "error" : "running")
+    const toolState: "running" | "completed" | "error" = (rawStatus === "completed" || rawStatus === "error") ? rawStatus : "running"
 
     if (partSessionId) {
       emit(partSessionId, {
