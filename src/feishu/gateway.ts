@@ -57,7 +57,8 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   let wsAgent: Agent | undefined
   if (proxyUrl) {
     wsAgent = new HttpsProxyAgent(proxyUrl)
-    log("info", "WS proxy enabled", { proxy: proxyUrl })
+    // 代理地址可能带账号密码；日志里只保留脱敏后的可定位信息，避免敏感凭据落盘。
+    log("info", "WS proxy enabled", { proxy: redactProxyUrlForLog(proxyUrl) })
   }
 
   // EventDispatcher 是飞书 SDK 的事件分发核心；这里只注册我们真正关心的几类事件。
@@ -189,6 +190,17 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
             })
           }
           const targetChatId = callbackChatId || parsedAction.chatId
+          // 新卡片会把 chatType 一并写进 payload；如果旧卡片缺失，就拒绝这次点击，避免误路由到 p2p 会话。
+          if (!parsedAction.chatType) {
+            log("error", "send_message 按钮缺少 chatType，已拒绝处理", {
+              callbackChatId,
+              payloadChatId: parsedAction.chatId,
+              operatorId: action.operatorId,
+            })
+            return {
+              toast: { type: "warning", content: "⚠️ 卡片已过期，请重新触发" },
+            }
+          }
           const syntheticCtx: FeishuMessageContext = {
             chatId: targetChatId,
             messageId: `btn-${randomUUID()}`,
@@ -264,4 +276,21 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   }
 
   return { client: larkClient, stop }
+}
+
+/**
+ * 代理 URL 可能带有 `user:pass@host` 形式的凭据。
+ * 日志里统一脱敏，既保留排障所需的地址信息，也避免明文暴露敏感字段。
+ */
+function redactProxyUrlForLog(proxyUrl: string): string {
+  try {
+    const parsed = new URL(proxyUrl)
+    if (parsed.username || parsed.password) {
+      parsed.username = "***"
+      parsed.password = "***"
+    }
+    return parsed.toString()
+  } catch {
+    return "[invalid-proxy-url]"
+  }
 }

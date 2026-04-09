@@ -38,7 +38,11 @@ type SendMessageActionValue = {
   action: "send_message"
   text: string
   chatId: string
-  chatType: "p2p" | "group"
+  /**
+   * chatType 由发卡侧写入；老卡片或外部构造 payload 可能缺失。
+   * 这里保留“缺失态”，交给 gateway 结合回调上下文做最终判定。
+   */
+  chatType?: "p2p" | "group"
 }
 
 export type ParsedCardActionValue =
@@ -121,7 +125,9 @@ export function parseCardActionValue(
         action: "send_message",
         text,
         chatId,
-        chatType: value.chatType === "group" ? "group" : "p2p",
+        chatType: value.chatType === "group" || value.chatType === "p2p"
+          ? value.chatType
+          : undefined,
       }
     }
     default:
