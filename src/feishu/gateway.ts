@@ -180,8 +180,17 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         // 特判 send_message 按钮：把按钮点击伪装成一条新的用户文本消息，复用正常消息链路。
         const parsedAction = parseCardActionValue(action.actionValue, log)
         if (parsedAction?.action === "send_message") {
+          // 飞书回调上下文里的 chatId 才是本次点击发生位置的权威来源，按钮 payload 只做冗余校验。
+          const callbackChatId = action.chatId?.trim() ?? ""
+          if (callbackChatId && callbackChatId !== parsedAction.chatId) {
+            log("warn", "send_message 按钮 chatId 与回调上下文不一致，使用回调 chatId", {
+              callbackChatId,
+              payloadChatId: parsedAction.chatId,
+            })
+          }
+          const targetChatId = callbackChatId || parsedAction.chatId
           const syntheticCtx: FeishuMessageContext = {
-            chatId: parsedAction.chatId,
+            chatId: targetChatId,
             messageId: `btn-${randomUUID()}`,
             messageType: "text",
             content: parsedAction.text,

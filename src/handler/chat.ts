@@ -230,8 +230,13 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           if (done) return
           try {
             const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…", log)
-            // 发送是异步的，返回后要再次确认主流程还没结束。
-            if (done) return
+            // 发送是异步的；如果主流程已经结束，要把这条“迟到”的占位消息删掉。
+            if (done) {
+              if (res.ok && res.messageId) {
+                await sender.deleteMessage(feishuClient, res.messageId, log)
+              }
+              return
+            }
             if (!res.ok) {
               log("error", "发送占位消息失败", {
                 chatId,
@@ -318,7 +323,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     // Session 历史中毒检测优先于模型恢复：这类问题靠重试几乎不会好。
     if (sessionError && isSessionPoisoned(sessionError.fields)) {
-      log("warn", "检测到 session 历史数据中毒，创建新 session", {
+      log("error", "检测到 session 历史数据中毒，创建新 session", {
         sessionKey, oldSessionId: session.id, error: sessionError.message,
       })
       invalidateSession(sessionKey)

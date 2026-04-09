@@ -35,33 +35,49 @@ export async function extractParts(
   maxResourceSize: number,
 ): Promise<PromptPart[]> {
   try {
+    let parts: PromptPart[]
+
     // 先按消息类型分发到专用提取函数，再由各函数处理自己的细节。
     switch (messageType) {
       case "text":
-        return extractText(rawContent)
+        parts = extractText(rawContent)
+        break
       case "image":
-        return await extractImage(feishuClient, messageId, rawContent, log, maxResourceSize)
+        parts = await extractImage(feishuClient, messageId, rawContent, log, maxResourceSize)
+        break
       case "post":
-        return await extractPost(feishuClient, messageId, rawContent, log, maxResourceSize)
+        parts = await extractPost(feishuClient, messageId, rawContent, log, maxResourceSize)
+        break
       case "file":
-        return await extractFile(feishuClient, messageId, rawContent, log, maxResourceSize)
+        parts = await extractFile(feishuClient, messageId, rawContent, log, maxResourceSize)
+        break
       case "audio":
-        return await extractAudio(feishuClient, messageId, rawContent, log, maxResourceSize)
+        parts = await extractAudio(feishuClient, messageId, rawContent, log, maxResourceSize)
+        break
       case "media":
-        return extractMediaFallback()
+        parts = extractMediaFallback()
+        break
       case "sticker":
-        return [{ type: "text", text: "[表情包]" }]
+        parts = [{ type: "text", text: "[表情包]" }]
+        break
       case "interactive":
-        return extractInteractive(rawContent, log)
+        parts = extractInteractive(rawContent, log)
+        break
       case "share_chat":
-        return extractShareChat(rawContent, log)
+        parts = extractShareChat(rawContent, log)
+        break
       case "share_user":
-        return [{ type: "text", text: "[分享了一个用户名片]" }]
+        parts = [{ type: "text", text: "[分享了一个用户名片]" }]
+        break
       case "merge_forward":
-        return [{ type: "text", text: "[合并转发消息]" }]
+        parts = [{ type: "text", text: "[合并转发消息]" }]
+        break
       default:
-        return [{ type: "text", text: `[不支持的消息类型: ${messageType}]` }]
+        parts = [{ type: "text", text: `[不支持的消息类型: ${messageType}]` }]
+        break
     }
+
+    return normalizeExtractedParts(parts, messageType)
   } catch (err) {
     // 内容提取失败不应让整条消息链路崩溃，统一降级为可读文本提示。
     log("error", "消息内容提取失败", {
@@ -126,6 +142,14 @@ export function describeMessageType(messageType: string, rawContent: string, log
     default:
       return `[${messageType}]`
   }
+}
+
+/**
+ * 兜底保证 extractor 的输出永远非空，避免调用方把消息静默丢弃。
+ */
+function normalizeExtractedParts(parts: PromptPart[], messageType: string): PromptPart[] {
+  if (parts.length > 0) return parts
+  return [{ type: "text", text: `[消息内容为空或解析失败: ${messageType}]` }]
 }
 
 /**
@@ -355,7 +379,10 @@ async function extractFile(
   }
 
   // 其他二进制文件（PDF/DOCX/XLSX/ZIP 等）→ 当前不直接喂给 SDK，降级为文本描述。
-  const sizeMB = (result.resource.dataUrl.length * 0.75 / (1024 * 1024)).toFixed(1)
+  // data URL 的前缀不是文件内容本身，估算体积时只统计逗号后的 base64 payload。
+  const commaIndex = result.resource.dataUrl.indexOf(",")
+  const base64Data = commaIndex >= 0 ? result.resource.dataUrl.slice(commaIndex + 1) : ""
+  const sizeMB = (base64Data.length * 0.75 / (1024 * 1024)).toFixed(1)
   return [{ type: "text", text: `[文件: ${fileName}, ${sizeMB}MB]` }]
 }
 

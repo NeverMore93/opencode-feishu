@@ -5,6 +5,10 @@
  * - 同一 session 的上下文顺序正确
  * - 占位消息/流式卡片不会被并发覆盖
  * - 群聊中多个 @bot 请求不会互相踩状态
+ *
+ * 说明：
+ * - 单聊不再做“新消息打断旧消息”的 CLI 式中断，避免 IM 场景里出现残留撤回或丢回复
+ * - `session.idle` 之后的继续催促已经转移到 `event.ts` 的 nudge 流程，不再由队列维护第二阶段循环
  */
 import type { FeishuMessageContext } from "../types.js"
 import { handleChat, type ChatDeps } from "./chat.js"

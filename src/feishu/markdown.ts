@@ -49,16 +49,18 @@ const HTML_TAG_RE = /<\/?\w+(?:\s[^>]*)?\/?>/g
 export function cleanMarkdown(text: string): string {
   // 第一步：将 <br> / <br/> 转换为换行符（飞书不支持 <br> 标签）
   let result = text.replace(/<br\s*\/?>/gi, "\n")
+  // 第二步：先补全未闭合代码块，避免半截代码块被当成普通文本做 HTML 清洗。
+  result = closeCodeBlocks(result)
 
-  // 第二步：提取代码块，用 NUL 字符占位，避免代码块中的泛型语法被误删
+  // 第三步：提取代码块，用 NUL 字符占位，避免代码块中的泛型语法被误删
   const { segments, codeBlocks } = extractCodeBlocks(result)
   // 只对非代码段执行 HTML 标签清理
   result = segments.map(seg => seg.replace(HTML_TAG_RE, "")).join("\0")
-  // 第三步：将 NUL 占位符替换回原始代码块内容
+  // 第四步：将 NUL 占位符替换回原始代码块内容
   let idx = 0
   result = result.replace(/\0/g, () => codeBlocks[idx++] ?? "")
 
-  // 第四步：确保代码块闭合（流式输出可能在 ``` 之间截断）
+  // 第五步：兜底再检查一次，兼容清洗过程中新插入换行后的代码块状态。
   result = closeCodeBlocks(result)
   return result
 }

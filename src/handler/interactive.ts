@@ -59,6 +59,13 @@ function markSeen(requestId: string): boolean {
 }
 
 /**
+ * 发送失败时回滚已保留的 requestId，允许后续重试重新补发卡片。
+ */
+function unmarkSeen(requestId: string): void {
+  seenIds.delete(requestId)
+}
+
+/**
  * 解析 card action payload，并只保留当前仓库真正处理的三类动作。
  *
  * 这样 `interactive.ts` 和 `gateway.ts` 不必各自手写一套 JSON.parse + 字段校验。
@@ -141,11 +148,14 @@ function sendRequestCard(params: {
     deps.log("warn", missingClientMessage, { requestId })
     return
   }
+  // 先占住 requestId，避免同一条 SSE 在发送尚未完成时并发发出重复卡片。
   if (!requestId || !markSeen(requestId)) return
 
   void (async () => {
     const res = await sender.sendInteractiveCard(deps.feishuClient, chatId, card, deps.log)
     if (!res.ok) {
+      // 发送失败要回滚占位，避免后续相同 requestId 永久失去重试机会。
+      unmarkSeen(requestId)
       deps.log("error", sendFailureMessage, {
         requestId,
         chatId,
@@ -154,6 +164,7 @@ function sendRequestCard(params: {
     }
   })().catch((err) => {
     // 交互卡片是增强能力，失败后不应让主链路崩溃。
+    unmarkSeen(requestId)
     deps.log("error", sendFailureMessage, {
       requestId,
       chatId,
