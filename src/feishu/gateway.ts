@@ -42,6 +42,78 @@ export interface FeishuGatewayResult {
 }
 
 /**
+ * 将飞书会话类型压缩成仓库内部统一使用的 `"group" | "p2p"`。
+ *
+ * 飞书 REST `chat.get` 返回的 `chat_mode` / `chat_type` 可能出现不同字面量，
+ * 这里只做最小必要映射；无法识别时返回 `undefined`，交由上层决定是否拒绝。
+ */
+function normalizeResolvedChatType(rawValue: string | undefined): "group" | "p2p" | undefined {
+  const normalized = rawValue?.trim().toLowerCase()
+  if (!normalized) return undefined
+  if (normalized.includes("p2p")) return "p2p"
+  if (normalized.includes("group") || normalized.includes("topic")) return "group"
+  return undefined
+}
+
+/**
+ * 为卡片 `send_message` 回调确定最终 chatType。
+ *
+ * 普通新卡片会自带 `chatType`；只有旧卡片缺字段，或 payload/chat 回调上下文不一致时，
+ * 才额外查询飞书会话信息做权威兜底，避免把群聊误路由到 p2p session。
+ */
+async function resolveCardActionChatType(params: {
+  chatId: string
+  payloadChatType?: "p2p" | "group"
+  requireAuthoritativeLookup: boolean
+  larkClient: InstanceType<typeof Lark.Client>
+  log: LogFn
+}): Promise<"p2p" | "group" | undefined> {
+  const { chatId, payloadChatType, requireAuthoritativeLookup, larkClient, log } = params
+  if (!requireAuthoritativeLookup && payloadChatType) {
+    return payloadChatType
+  }
+
+  try {
+    const response = await larkClient.im.chat.get({
+      path: { chat_id: chatId },
+    })
+    const resolvedFromResponse =
+      normalizeResolvedChatType(response.data?.chat_mode) ??
+      normalizeResolvedChatType(response.data?.chat_type)
+
+    if (resolvedFromResponse) {
+      if (payloadChatType && payloadChatType !== resolvedFromResponse) {
+        log("warn", "send_message 按钮 chatType 与飞书会话信息不一致，使用飞书会话类型", {
+          chatId,
+          payloadChatType,
+          resolvedChatType: resolvedFromResponse,
+          chatMode: response.data?.chat_mode ?? "",
+          rawChatType: response.data?.chat_type ?? "",
+        })
+      }
+      return resolvedFromResponse
+    }
+
+    log("error", "无法从飞书会话信息推断 send_message 按钮 chatType", {
+      chatId,
+      payloadChatType: payloadChatType ?? "",
+      chatMode: response.data?.chat_mode ?? "",
+      rawChatType: response.data?.chat_type ?? "",
+      code: response.code ?? 0,
+      msg: response.msg ?? "",
+    })
+  } catch (err) {
+    log("error", "查询 send_message 按钮会话信息失败", {
+      chatId,
+      payloadChatType: payloadChatType ?? "",
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  return requireAuthoritativeLookup ? undefined : payloadChatType
+}
+
+/**
  * 启动飞书 WebSocket 网关，返回 Client（供 sender 使用）和 stop 函数
  */
 export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGatewayResult {
@@ -190,16 +262,34 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
             })
           }
           const targetChatId = callbackChatId || parsedAction.chatId
-          // 新卡片会把 chatType 一并写进 payload；如果旧卡片缺失，就拒绝这次点击，避免误路由到 p2p 会话。
-          if (!parsedAction.chatType) {
-            log("error", "send_message 按钮缺少 chatType，已拒绝处理", {
+          const chatIdMismatch = !!callbackChatId && callbackChatId !== parsedAction.chatId
+          const resolvedChatType = await resolveCardActionChatType({
+            chatId: targetChatId,
+            payloadChatType: parsedAction.chatType,
+            // 旧卡片缺 chatType 或 payload chatId 已明显过期时，必须查飞书权威会话信息再继续。
+            requireAuthoritativeLookup: !parsedAction.chatType || chatIdMismatch,
+            larkClient,
+            log,
+          })
+          if (!resolvedChatType) {
+            log("error", "send_message 按钮 chatType 无法确定，已拒绝处理", {
               callbackChatId,
               payloadChatId: parsedAction.chatId,
+              payloadChatType: parsedAction.chatType ?? "",
+              targetChatId,
               operatorId: action.operatorId,
             })
             return {
               toast: { type: "warning", content: "⚠️ 卡片已过期，请重新触发" },
             }
+          }
+          if (!parsedAction.chatType) {
+            log("warn", "send_message 按钮缺少 chatType，已按飞书会话信息兼容推断", {
+              callbackChatId,
+              payloadChatId: parsedAction.chatId,
+              targetChatId,
+              resolvedChatType,
+            })
           }
           const syntheticCtx: FeishuMessageContext = {
             chatId: targetChatId,
@@ -207,7 +297,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
             messageType: "text",
             content: parsedAction.text,
             rawContent: JSON.stringify({ text: parsedAction.text }),
-            chatType: parsedAction.chatType,
+            chatType: resolvedChatType,
             senderId: action.operatorId ?? "",
             shouldReply: true,
           }

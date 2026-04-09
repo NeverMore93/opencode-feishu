@@ -22,19 +22,19 @@ export interface InteractiveDeps {
 /** 去重：同一 requestId 只发一张卡片（TTL 防止内存泄漏） */
 const seenIds = new TtlMap<true>(10 * 60 * 1_000)
 
-type PermissionReplyActionValue = {
+interface PermissionReplyActionValue {
   action: "permission_reply"
   requestId: string
   reply: "once" | "always" | "reject"
 }
 
-type QuestionReplyActionValue = {
+interface QuestionReplyActionValue {
   action: "question_reply"
   requestId: string
   answers: string[][]
 }
 
-type SendMessageActionValue = {
+interface SendMessageActionValue {
   action: "send_message"
   text: string
   chatId: string
