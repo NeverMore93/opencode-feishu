@@ -1,19 +1,25 @@
 /**
- * 飞书 WebSocket 长连接：接收消息并回调
+ * 飞书 WebSocket 网关。
+ *
+ * 它负责把飞书事件世界翻译成仓库内部可消费的三个入口：
+ * - `onMessage`：收到一条可处理消息
+ * - `onBotAdded`：bot 被拉入群
+ * - `onCardAction`：用户点击卡片按钮
  */
 import * as Lark from "@larksuiteoapi/node-sdk"
 import type { Agent } from "node:https"
 import { randomUUID } from "node:crypto"
 import * as httpsProxyAgent from "https-proxy-agent"
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
-import { type CardActionData, buildCallbackResponse } from "../handler/interactive.js"
+import { type CardActionData, buildCallbackResponse, parseCardActionValue } from "../handler/interactive.js"
 import { isDuplicate } from "./dedup.js"
 import { describeMessageType } from "./content-extractor.js"
 import { isBotMentioned } from "./group-filter.js"
 
-// 兼容 Bun 和 Node.js 的 CJS/ESM interop
+// 兼容 Bun 和 Node.js 的 CJS/ESM interop。
 const { HttpsProxyAgent } = httpsProxyAgent
 
+/** 启动飞书网关所需的外部依赖。 */
 export interface FeishuGatewayOptions {
   config: ResolvedConfig
   /** 外部创建的 Lark Client（复用 token 管理和 HTTP 客户端） */
@@ -29,7 +35,9 @@ export interface FeishuGatewayOptions {
 }
 
 export interface FeishuGatewayResult {
+  /** 复用的飞书 SDK client，供发送模块继续使用。 */
   client: InstanceType<typeof Lark.Client>
+  /** 主动关闭 WebSocket 连接的函数。 */
   stop: () => void
 }
 
@@ -39,6 +47,7 @@ export interface FeishuGatewayResult {
 export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGatewayResult {
   const { config, larkClient, botOpenId = "", onMessage, onBotAdded, onCardAction, log } = options
   const { appId, appSecret } = config
+  // 优先读取常见代理环境变量，让 WebSocket 也能跟随企业网络设置。
   const proxyUrl =
     process.env.HTTPS_PROXY ||
     process.env.HTTP_PROXY ||
@@ -51,6 +60,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     log("info", "WS proxy enabled", { proxy: proxyUrl })
   }
 
+  // EventDispatcher 是飞书 SDK 的事件分发核心；这里只注册我们真正关心的几类事件。
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data: Record<string, unknown>) => {
       try {
@@ -64,6 +74,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         if (!chatId) return
 
         const messageId = message.message_id as string | undefined
+        // 去重必须尽早做，避免后面一整条消息链路重复执行。
         if (isDuplicate(messageId)) return
 
         const messageType = (message.message_type as string) ?? "text"
@@ -77,15 +88,16 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         if (!rawContent) return
 
         // 提取文本内容（用于 @提及清理和空消息过滤）
-        let text = describeMessageType(messageType, rawContent)
+        let text = describeMessageType(messageType, rawContent, log)
         if (messageType === "text") {
+          // text 消息里的 @mention token 在决定 shouldReply 后就没有必要再传给模型。
           text = text.replace(/@_user_\d+\s*/g, "").trim()
         }
         if (!text) return
 
         const chatType = (message.chat_type as string) === "group" ? "group" : "p2p"
 
-        // 群聊：仅在被 @ 时回复（静默监听）
+        // 群聊默认静默监听；只有真的 @到 bot 才转入“需要回复”的链路。
         let shouldReply = true
         if (chatType === "group") {
           const mentions = Array.isArray(message.mentions) ? message.mentions : []
@@ -101,6 +113,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         const parentId = message.parent_id as string | undefined
         const createTime = message.create_time as string | undefined
 
+        // 把飞书原始事件折叠成仓库内部统一消息上下文。
         const ctx: FeishuMessageContext = {
           chatId: String(chatId),
           messageId: messageId ?? "",
@@ -134,6 +147,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
       try {
         const chatId = data.chat_id as string | undefined
         if (chatId && onBotAdded) {
+          // Bot 刚被拉入群时，异步触发历史消息摄入。
           log("info", "Bot 被添加到群聊", { chatId })
           await onBotAdded(chatId)
         }
@@ -145,7 +159,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     },
     "card.action.trigger": async (data: Record<string, unknown>) => {
       try {
-        // 类型化事件 payload（双路径兼容 SDK v1/v2 格式）
+        // 类型化事件 payload（双路径兼容 SDK v1/v2 格式）。
         const evt = data as {
           action?: { value?: unknown; tag?: string }
           context?: { open_message_id?: string; open_chat_id?: string }
@@ -163,16 +177,16 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           operatorId: String(evt.operator?.open_id ?? ""),
         }
 
-        // 检测 send_message 按钮：构造合成消息，走正常消息流程
-        const sendMsg = parseSendMessageAction(action)
-        if (sendMsg) {
+        // 特判 send_message 按钮：把按钮点击伪装成一条新的用户文本消息，复用正常消息链路。
+        const parsedAction = parseCardActionValue(action.actionValue, log)
+        if (parsedAction?.action === "send_message") {
           const syntheticCtx: FeishuMessageContext = {
-            chatId: sendMsg.chatId,
+            chatId: parsedAction.chatId,
             messageId: `btn-${randomUUID()}`,
             messageType: "text",
-            content: sendMsg.text,
-            rawContent: JSON.stringify({ text: sendMsg.text }),
-            chatType: sendMsg.chatType,
+            content: parsedAction.text,
+            rawContent: JSON.stringify({ text: parsedAction.text }),
+            chatType: parsedAction.chatType,
             senderId: action.operatorId ?? "",
             shouldReply: true,
           }
@@ -181,10 +195,11 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
               error: err instanceof Error ? err.message : String(err),
             })
           })
-          return buildCallbackResponse(action)
+          // 即使后台还没处理完，也要马上给飞书回一个 toast。
+          return buildCallbackResponse(action, log)
         }
 
-        // fire-and-forget（必须 3s 内返回）
+        // 其他交互统一走 onCardAction，后台异步处理，避免卡住飞书 3 秒响应窗口。
         if (onCardAction) {
           void onCardAction(action).catch((err) => {
             log("error", "card action 处理失败", {
@@ -194,7 +209,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         }
 
         // 即时返回 toast
-        return buildCallbackResponse(action)
+        return buildCallbackResponse(action, log)
       } catch (err) {
         log("error", "card.action.trigger 处理异常", {
           error: err instanceof Error ? err.message : String(err),
@@ -220,6 +235,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     ...(wsAgent ? { agent: wsAgent } : {}),
     loggerLevel: logLevelMap[config.logLevel] ?? Lark.LoggerLevel.info,
     logger: {
+      // 飞书 SDK 的不同级别统一桥接到项目日志系统。
       error: (...msg: unknown[]) => log("error", "[lark.ws]", { msg }),
       warn: (...msg: unknown[]) => log("warn", "[lark.ws]", { msg }),
       info: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
@@ -232,34 +248,11 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   log("info", "飞书 WebSocket 网关已启动", { appIdPrefix: appId.slice(0, 8) + "..." })
 
   const stop = () => {
+    // 停止时只需要关闭 WSClient；飞书 SDK 自身会处理底层连接资源。
     log("info", "飞书 WebSocket 网关停止中")
     wsClient.close()
     log("info", "飞书 WebSocket 网关已停止")
   }
 
   return { client: larkClient, stop }
-}
-
-interface SendMessagePayload {
-  chatId: string
-  chatType: "p2p" | "group"
-  text: string
-}
-
-/**
- * 解析 send_message 类型的按钮回调 value
- */
-function parseSendMessageAction(action: CardActionData): SendMessagePayload | undefined {
-  if (!action.actionValue) return undefined
-  try {
-    const value = JSON.parse(action.actionValue) as Record<string, unknown>
-    if (value.action !== "send_message") return undefined
-    const text = typeof value.text === "string" ? value.text : ""
-    const chatId = typeof value.chatId === "string" ? value.chatId : ""
-    if (!text || !chatId) return undefined
-    const chatType = value.chatType === "group" ? "group" as const : "p2p" as const
-    return { chatId, chatType, text }
-  } catch {
-    return undefined
-  }
 }

@@ -1,5 +1,6 @@
 /**
- * 交互式事件处理：权限审批/问答卡片发送 + 回调分发
+ * 交互处理层：把 OpenCode 的权限/问答请求渲染成飞书卡片，
+ * 再把用户点击结果回传给 OpenCode v2 接口。
  */
 import type { PermissionRequest, QuestionRequest, LogFn } from "../types.js"
 import { buildCardFromDSL, type ButtonInput, type SectionInput } from "../tools/send-card.js"
@@ -8,65 +9,208 @@ import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { TtlMap } from "../utils/ttl-map.js"
 
+/** 交互模块需要的外部依赖。 */
 export interface InteractiveDeps {
+  /** 飞书 SDK client，用于实际发送卡片。 */
   feishuClient: InstanceType<typeof Lark.Client>
+  /** 项目统一日志函数。 */
   log: LogFn
+  /** OpenCode v2 client；缺失时无法进行权限/问答回传。 */
   v2Client?: OpencodeClient
 }
 
 /** 去重：同一 requestId 只发一张卡片（TTL 防止内存泄漏） */
 const seenIds = new TtlMap<true>(10 * 60 * 1_000)
 
+type PermissionReplyActionValue = {
+  action: "permission_reply"
+  requestId: string
+  reply: "once" | "always" | "reject"
+}
+
+type QuestionReplyActionValue = {
+  action: "question_reply"
+  requestId: string
+  answers: string[][]
+}
+
+type SendMessageActionValue = {
+  action: "send_message"
+  text: string
+  chatId: string
+  chatType: "p2p" | "group"
+}
+
+export type ParsedCardActionValue =
+  | PermissionReplyActionValue
+  | QuestionReplyActionValue
+  | SendMessageActionValue
+
+/**
+ * 标记 requestId 是否首次出现。
+ *
+ * 返回 `true` 表示这次应该继续发送卡片，
+ * 返回 `false` 表示此前已经处理过相同 requestId。
+ */
 function markSeen(requestId: string): boolean {
   if (seenIds.has(requestId)) return false
   seenIds.set(requestId, true)
   return true
 }
 
+/**
+ * 解析 card action payload，并只保留当前仓库真正处理的三类动作。
+ *
+ * 这样 `interactive.ts` 和 `gateway.ts` 不必各自手写一套 JSON.parse + 字段校验。
+ */
+export function parseCardActionValue(
+  actionValue: string | undefined,
+  log?: LogFn,
+): ParsedCardActionValue | undefined {
+  if (!actionValue) return undefined
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(actionValue)
+  } catch (err) {
+    // 非法 actionValue 仍然按软失败处理，但会留下 error 日志便于排查卡片协议问题。
+    log?.("error", "解析卡片 actionValue 失败", {
+      actionValue,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return undefined
+  }
+
+  if (!parsed || typeof parsed !== "object") return undefined
+  const value = parsed as Record<string, unknown>
+  const requestId = typeof value.requestId === "string" ? value.requestId : ""
+
+  switch (value.action) {
+    case "permission_reply": {
+      const reply = value.reply
+      if (!requestId || (reply !== "once" && reply !== "always" && reply !== "reject")) {
+        return undefined
+      }
+      return { action: "permission_reply", requestId, reply }
+    }
+    case "question_reply": {
+      const answers = value.answers
+      if (
+        !requestId ||
+        !Array.isArray(answers) ||
+        answers.some(
+          (group) => !Array.isArray(group) || group.some((answer) => typeof answer !== "string"),
+        )
+      ) {
+        return undefined
+      }
+      return { action: "question_reply", requestId, answers }
+    }
+    case "send_message": {
+      const text = typeof value.text === "string" ? value.text : ""
+      const chatId = typeof value.chatId === "string" ? value.chatId : ""
+      if (!text || !chatId) return undefined
+      return {
+        action: "send_message",
+        text,
+        chatId,
+        chatType: value.chatType === "group" ? "group" : "p2p",
+      }
+    }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * 异步发送交互卡片，并补一层带 requestId/chatId 的业务日志。
+ *
+ * sender 层会把飞书 SDK 异常折叠成 `{ ok: false }`，
+ * 这里负责检查结果并保留更完整的业务上下文。
+ */
+function sendRequestCard(params: {
+  requestId: string
+  chatId: string
+  deps: InteractiveDeps
+  card: object
+  missingClientMessage: string
+  sendFailureMessage: string
+}): void {
+  const { requestId, chatId, deps, card, missingClientMessage, sendFailureMessage } = params
+  if (!deps.v2Client) {
+    deps.log("warn", missingClientMessage, { requestId })
+    return
+  }
+  if (!requestId || !markSeen(requestId)) return
+
+  void (async () => {
+    const res = await sender.sendInteractiveCard(deps.feishuClient, chatId, card, deps.log)
+    if (!res.ok) {
+      deps.log("error", sendFailureMessage, {
+        requestId,
+        chatId,
+        error: res.error ?? "unknown",
+      })
+    }
+  })().catch((err) => {
+    // 交互卡片是增强能力，失败后不应让主链路崩溃。
+    deps.log("error", sendFailureMessage, {
+      requestId,
+      chatId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
+}
+
+/**
+ * 发送权限审批卡片。
+ *
+ * 发送失败只记录日志，不阻断主对话流程。
+ */
 export function handlePermissionRequested(
   request: PermissionRequest,
   chatId: string,
   deps: InteractiveDeps,
   chatType: "p2p" | "group" = "p2p",
 ): void {
-  if (!deps.v2Client) {
-    deps.log("warn", "v2Client 未配置，跳过权限卡片发送", { requestId: String(request.id ?? "") })
-    return
-  }
   const requestId = String(request.id ?? "")
-  if (!requestId || !markSeen(requestId)) return
-
-  const card = buildPermissionCardDSL(request, chatId, chatType)
-  sender.sendInteractiveCard(deps.feishuClient, chatId, card).catch((err) => {
-    deps.log("warn", "发送权限卡片失败", {
-      requestId,
-      error: err instanceof Error ? err.message : String(err),
-    })
+  sendRequestCard({
+    requestId,
+    chatId,
+    deps,
+    card: buildPermissionCardDSL(request, chatId, chatType),
+    missingClientMessage: "v2Client 未配置，跳过权限卡片发送",
+    sendFailureMessage: "发送权限卡片失败",
   })
 }
 
+/**
+ * 发送问答选择卡片。
+ *
+ * 当前实现只渲染第一题，适合“单问题、按钮式确认”的场景。
+ */
 export function handleQuestionRequested(
   request: QuestionRequest,
   chatId: string,
   deps: InteractiveDeps,
   chatType: "p2p" | "group" = "p2p",
 ): void {
-  if (!deps.v2Client) {
-    deps.log("warn", "v2Client 未配置，跳过问答卡片发送", { requestId: String(request.id ?? "") })
-    return
-  }
   const requestId = String(request.id ?? "")
-  if (!requestId || !markSeen(requestId)) return
-
-  const card = buildQuestionCardDSL(request, chatId, chatType)
-  sender.sendInteractiveCard(deps.feishuClient, chatId, card).catch((err) => {
-    deps.log("warn", "发送问答卡片失败", {
-      requestId,
-      error: err instanceof Error ? err.message : String(err),
-    })
+  sendRequestCard({
+    requestId,
+    chatId,
+    deps,
+    card: buildQuestionCardDSL(request, chatId, chatType),
+    missingClientMessage: "v2Client 未配置，跳过问答卡片发送",
+    sendFailureMessage: "发送问答卡片失败",
   })
 }
 
+/**
+ * 飞书 `card.action.trigger` 回调里，本仓库真正关心的字段。
+ *
+ * 保持宽松结构是为了兼容飞书 SDK 事件体的版本差异。
+ */
 export interface CardActionData {
   actionValue: string | undefined
   actionTag: string | undefined
@@ -76,13 +220,17 @@ export interface CardActionData {
 }
 
 /**
- * 处理卡片按钮点击回调（异步，不阻塞回调返回）
+ * 处理卡片点击后的异步回传。
+ *
+ * 这里只处理真正需要调用 OpenCode v2 API 的 payload；
+ * 普通 `send_message` 按钮已经在 `gateway.ts` 中被转成合成消息事件。
  */
 export async function handleCardAction(
   action: CardActionData,
   deps: InteractiveDeps,
 ): Promise<void> {
-  if (!action.actionValue) return
+  const value = parseCardActionValue(action.actionValue, deps.log)
+  if (!value || value.action === "send_message") return
   if (!deps.v2Client) {
     deps.log("warn", "v2Client 未配置，交互回调被忽略（按钮点击不会转发到 OpenCode）", {
       actionValue: action.actionValue,
@@ -90,53 +238,36 @@ export async function handleCardAction(
     return
   }
 
-  type PermissionReplyValue = { action: "permission_reply"; requestId: string; reply: "once" | "always" | "reject" }
-  type QuestionReplyValue = { action: "question_reply"; requestId: string; answers: string[][] }
-  type ActionValue = PermissionReplyValue | QuestionReplyValue | { action?: string; requestId?: string }
-
-  let value: ActionValue
   try {
-    value = JSON.parse(action.actionValue)
-  } catch {
-    return
-  }
-
-  const requestId = value.requestId
-  if (!requestId) return
-
-  try {
-    if (value.action === "permission_reply" && "reply" in value) {
+    if (value.action === "permission_reply") {
       await deps.v2Client.permission.reply({
-        requestID: requestId,
+        requestID: value.requestId,
         reply: value.reply,
       })
-    } else if (value.action === "question_reply" && "answers" in value) {
+    } else {
       await deps.v2Client.question.reply({
-        requestID: requestId,
+        requestID: value.requestId,
         answers: value.answers,
       })
     }
   } catch (err) {
     deps.log("error", "交互回调处理失败", {
       action: value.action,
-      requestId,
+      requestId: value.requestId,
       error: err instanceof Error ? err.message : String(err),
     })
   }
 }
 
 /**
- * 构建即时回调响应（3 秒内返回 toast）
+ * 构建飞书要求的即时回调响应。
+ *
+ * 飞书要求 `card.action.trigger` 很快返回，因此这里只回 toast，
+ * 真正的业务处理在后台异步完成。
  */
-export function buildCallbackResponse(action: CardActionData): object {
-  if (!action.actionValue) return {}
-
-  let value: { action?: string; reply?: string }
-  try {
-    value = JSON.parse(action.actionValue)
-  } catch {
-    return {}
-  }
+export function buildCallbackResponse(action: CardActionData, log?: LogFn): object {
+  const value = parseCardActionValue(action.actionValue, log)
+  if (!value) return {}
 
   if (value.action === "permission_reply") {
     const isReject = value.reply === "reject"
@@ -164,7 +295,10 @@ export function buildCallbackResponse(action: CardActionData): object {
 }
 
 /**
- * 使用统一 DSL 构建权限审批卡片
+ * 把权限请求翻译成统一的 card DSL。
+ *
+ * 这里的按钮通过 `actionPayload` 注入专用 JSON，
+ * 不走普通 `send_message` 分支。
  */
 function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chatType: "p2p" | "group"): object {
   const permission = String(request.permission ?? "unknown")
@@ -175,6 +309,7 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
     ? patterns.map(p => `- \`${p}\``).join("\n")
     : "（无具体路径）"
 
+  // 三个按钮对应 OpenCode permission.reply 支持的三种答复。
   const buttons: ButtonInput[] = [
     {
       text: "✅ 允许一次", value: "", style: "primary",
@@ -200,12 +335,15 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
 }
 
 /**
- * 使用统一 DSL 构建问答选择卡片
+ * 把问答请求翻译成按钮卡片。
+ *
+ * 当前每个选项都会映射成一个按钮，点击后回传 `answers: [[value]]`。
  */
 function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group"): object {
   const questions = request.questions ?? []
   const requestId = String(request.id ?? "")
 
+  // 当前仅消费第一题；若未来支持多题，需要额外的表单状态设计。
   const q = questions[0]
   const header = String(q?.header ?? "AI 提问")
   const questionText = String(q?.question ?? "请选择")

@@ -192,7 +192,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - per-session 事件订阅/发布：`subscribe(sessionId, cb)` 返回 unsubscribe 函数
 - `emit(sessionId, action)` fire-and-forget 分发，错误不阻塞
 - `unsubscribeAll(sessionId)` 清理所有订阅
-- `ProcessedAction` 联合类型：7 种事件（text-updated、tool-state-changed、subtask-discovered、permission-requested、question-requested、session-idle、session-error）
+- `ProcessedAction` 联合类型：5 种事件（text-updated、tool-state-changed、permission-requested、question-requested、session-idle）
 
 **交互处理器 (`src/handler/interactive.ts`):**
 - `handlePermissionRequested`/`handleQuestionRequested`：使用 `buildCardFromDSL` 构建交互卡片并发送到飞书
@@ -242,7 +242,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 **辅助模块：**
 - `src/feishu/dedup.ts` - 10 分钟消息去重窗口
 - `src/feishu/group-filter.ts` - @提及检测
-- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, ProcessedAction）
+- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, PermissionRequest, QuestionRequest）
 
 ## 配置
 
