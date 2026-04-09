@@ -101,7 +101,7 @@ npm run build
 
 **3. 创建飞书配置文件** `~/.config/opencode/plugins/feishu.json`：
 ```json
-{ "appId": "cli_xxxxxxxxxxxx", "appSecret": "your_secret", "maxResourceSize": 524288000 }
+{ "appId": "cli_xxxxxxxxxxxx", "appSecret": "your_secret" }
 ```
 
 ## 架构设计
@@ -146,7 +146,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 创建 `WSClient`（WebSocket 长连接，独立代理配置）
 - 处理 `im.message.receive_v1` 事件
 - 处理 `card.action.trigger` 卡片回调（权限/问答按钮，3 秒内返回 toast）
-- 消息去重（10 分钟窗口，通过 `dedup.ts`）
+- 消息去重（默认 10 分钟，可通过 `dedupTtl` 配置，通过 `dedup.ts`）
 - 群消息 @提及过滤（通过 `group-filter.ts`）
 - 处理 `im.chat.member.bot.added_v1` 用于历史摄入
 
@@ -208,7 +208,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - `truncateMarkdown(text, limit)`：截断到 28KB 并添加提示后缀
 
 **历史摄入 (`src/feishu/history.ts`):**
-- 通过飞书 API 获取最近 50 条群消息
+- 通过飞书 API 按 `maxHistoryMessages` 拉取最近群消息（单次请求 50 条分页）
 - 以 `noReply: true` 发送到 OpenCode（仅上下文）
 
 **消息发送器 (`src/feishu/sender.ts`):**
@@ -228,7 +228,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 供 feishu_send_card tool 和 system prompt 注入使用
 
 **辅助模块：**
-- `src/feishu/dedup.ts` - 10 分钟消息去重窗口
+- `src/feishu/dedup.ts` - 消息去重窗口（默认 10 分钟，可通过 `dedupTtl` 配置）
 - `src/feishu/group-filter.ts` - @提及检测
 - `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, PermissionRequest, QuestionRequest）
 
@@ -245,15 +245,26 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 ```json
 {
   "appId": "cli_xxxxxxxxxxxx",
-  "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "timeout": 120000,
-  "thinkingDelay": 2500
+  "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 }
 ```
 
 必需字段：`appId`, `appSecret`
-可选字段：`timeout`（默认 120000ms）、`thinkingDelay`（默认 2500ms）、`logLevel`（默认 `"info"`，控制 Lark SDK 日志级别）、`maxResourceSize`（默认 500MB，最大 500MB）
-空闲催促：`nudge` 对象 — `enabled`（默认 false）、`message`（默认“上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。”）、`intervalSeconds`（默认 30）、`maxIterations`（默认 3）
+可选字段：
+- `timeout`：对话轮询总超时（毫秒）；默认不设置固定超时。仅在显式配置时，超时后返回 `⚠️ 响应超时`
+- `thinkingDelay`：默认 `2500ms`
+- `logLevel`：默认 `"info"`，控制 Lark SDK 日志级别
+- `maxHistoryMessages`：默认 `200`，最大 `500`；飞书接口按每页 `50` 条分页拉取
+- `pollInterval`：默认 `1000ms`
+- `stablePolls`：默认 `3`
+- `dedupTtl`：默认 `600000ms`
+- `maxResourceSize`：默认 `500MB`，最大 `500MB`
+- `directory`：默认使用 OpenCode 当前工作目录（`ctx.directory`）；若 OpenCode 未提供则为空字符串；支持 `~` 和 `${ENV_VAR}` 展开
+- `nudge.enabled`：默认 `false`
+- `nudge.message`：默认“上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。”
+- `nudge.intervalSeconds`：默认 `30`
+- `nudge.maxIterations`：默认 `3`
+- `nudge` 真实行为：仅在 `session.idle` 且最后一条 assistant message 以 `tool` part 结尾时，向 OpenCode 发送 `synthetic prompt`；不会直接向飞书用户新增一条可见消息
 
 ## 群聊行为
 
@@ -269,7 +280,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ### 入群历史摄入
 - 由 `im.chat.member.bot.added_v1` 事件触发
-- 获取群聊最近 50 条消息
+- 按 `maxHistoryMessages` 拉取最近群消息（飞书接口按 50/页分页）
 - 以 `noReply: true` 发送所有消息到 OpenCode（仅上下文）
 
 ## 消息流程变体
@@ -310,8 +321,8 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 ## 错误处理
 
 - `open_id` 获取失败：直接抛出错误，阻止插件启动
-- 提示超时：`timeout` 后返回"⚠️ 响应超时"
-- 消息去重：10 分钟窗口防止重复处理
+- 提示超时：仅在显式配置 `timeout` 时，超时后返回"⚠️ 响应超时"
+- 消息去重：按 `dedupTtl` 窗口防止重复处理（默认 10 分钟）
 - 飞书消息发送失败：尽力更新占位消息，回退到发送新消息
 - 所有错误向飞书用户发送友好消息（不静默失败）
 
@@ -325,7 +336,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 **L2 轮询期间 SSE 错误检测**（chat.ts pollForResponse）：每次 poll 周期检查 `getSessionError()`
 - `pollForResponse()` 在 sleep 后、API 调用前检查 SSE 缓存的 session error
 - 检测到错误时抛出 `SessionErrorDetected` 异常（携带 sessionError 信息），立即终止轮询
-- 使模型异步失败（prompt 成功但模型报错）在 ~1 秒内被检测，而非等待 120 秒超时
+- 使模型异步失败（prompt 成功但模型报错）在下一次轮询（默认约 1 秒）内被检测，而非依赖固定超时
 
 **L3 模型不兼容自动恢复**（chat.ts）：检测模型错误时用全局默认模型重试
 - `getGlobalDefaultModel()`：通过 `client.config.get()` 读取 `Config.model` 字段（如 `"aigw/Codex-opus-4-6-v1"`），解析为 `{ providerID, modelID }`
@@ -378,5 +389,5 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - **不使用公网 webhook**：仅使用飞书 WebSocket 长连接
 - **单一 OpenCode 实例**：作为插件运行在 OpenCode 进程内
 - **会话恢复**：依赖标题前缀匹配（修改标题的会话可能无法恢复）
-- **消息去重**：仅 10 分钟窗口
+- **消息去重**：按 `dedupTtl` 窗口处理，默认 10 分钟
 - **插件生命周期**：由 OpenCode 管理，无独立进程
