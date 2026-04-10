@@ -141,9 +141,9 @@ function extractCodeBlocks(text: string): { segments: string[]; codeBlocks: stri
  * @returns 代码块已闭合的文本
  */
 function closeCodeBlocks(text: string): string {
-  // 统计 ``` 出现次数
-  const matches = text.match(/```/g)
-  // 奇数个 ``` 表示有未闭合的代码块，追加闭合标记
+  // 只统计真正作为 fence 起始的代码块分隔行，忽略正文中的行内反引号。
+  const matches = text.match(/^`{3,}.*$/gm)
+  // 奇数个 fence 行表示有未闭合的代码块，追加闭合标记。
   if (matches && matches.length % 2 !== 0) {
     return text + "\n```"
   }

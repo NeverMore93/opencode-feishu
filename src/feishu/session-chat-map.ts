@@ -12,7 +12,7 @@
 import { TtlMap } from "../utils/ttl-map.js"
 
 /** 聊天信息结构：包含飞书 chatId 和聊天类型 */
-interface ChatInfo {
+export interface ChatInfo {
   /** 飞书会话 ID */
   chatId: string
   /** 聊天类型：p2p（单聊）或 group（群聊） */

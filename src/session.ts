@@ -72,26 +72,30 @@ export async function getOrCreateSession(
   const titlePrefix = `${TITLE_PREFIX}-${sessionKey}-`
 
   const query = directory ? { directory } : undefined
-  const { data: sessions } = await client.session.list({ query })
-  if (Array.isArray(sessions)) {
-    // 只保留属于当前逻辑聊天的候选 session。
-    const candidates = sessions.filter(
-      (s) => s.title && s.title.startsWith(titlePrefix),
-    )
-    if (candidates.length > 0) {
-      // 多个候选时，优先复用最近创建的一条，尽量延续最新上下文。
-      candidates.sort((a, b) => {
-        const ca = a.time?.created ?? 0
-        const cb = b.time?.created ?? 0
-        return cb - ca
-      })
-      const best = candidates[0]
-      if (best?.id) {
-        const session = { id: best.id, title: best.title }
-        setCachedSession(sessionKey, session)
-        return session
+  try {
+    const { data: sessions } = await client.session.list({ query })
+    if (Array.isArray(sessions)) {
+      // 只保留属于当前逻辑聊天的候选 session。
+      const candidates = sessions.filter(
+        (s) => s.title && s.title.startsWith(titlePrefix),
+      )
+      if (candidates.length > 0) {
+        // 多个候选时，优先复用最近创建的一条，尽量延续最新上下文。
+        candidates.sort((a, b) => {
+          const ca = a.time?.created ?? 0
+          const cb = b.time?.created ?? 0
+          return cb - ca
+        })
+        const best = candidates[0]
+        if (best?.id) {
+          const session = { id: best.id, title: best.title }
+          setCachedSession(sessionKey, session)
+          return session
+        }
       }
     }
+  } catch {
+    // list 失败时退回创建新 session，优先保证当前消息链路继续推进。
   }
 
   // 第三层：完全找不到时，创建新 session。

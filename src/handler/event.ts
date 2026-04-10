@@ -391,8 +391,17 @@ function handleV2Event(event: Event, deps: EventDeps): void {
 /** 催促计数器：sessionId → { count, lastTime }（用户新消息时清理） */
 const nudgeState = new Map<string, { count: number; lastTime: number }>()
 
+/**
+ * 催促代数：每次用户新消息都会递增，用来让旧的 in-flight nudge 任务自我失效。
+ *
+ * 这样即使 `session.messages()` 已经发出，请求返回后也能知道：
+ * “这还是不是同一轮 idle 状态下允许发送的催促”。
+ */
+const nudgeGeneration = new Map<string, number>()
+
 /** 用户发新消息时清空该 session 的催促计数。 */
 export function clearNudge(sessionId: string): void {
+  nudgeGeneration.set(sessionId, (nudgeGeneration.get(sessionId) ?? 0) + 1)
   nudgeState.delete(sessionId)
 }
 
@@ -407,6 +416,7 @@ export function clearNudge(sessionId: string): void {
 async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void> {
   if (!deps.nudge.enabled) return
 
+  const generation = nudgeGeneration.get(sessionId) ?? 0
   const state = nudgeState.get(sessionId) ?? { count: 0, lastTime: 0 }
   if (state.count >= deps.nudge.maxIterations) return
   if (Date.now() - state.lastTime < deps.nudge.intervalSeconds * 1000) return
@@ -416,6 +426,8 @@ async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void
 
   try {
     const resp = await client.session.messages({ path: { id: sessionId }, query })
+    if ((nudgeGeneration.get(sessionId) ?? 0) !== generation) return
+
     const messages = resp?.data
     if (!Array.isArray(messages) || messages.length === 0) return
 
@@ -427,11 +439,16 @@ async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void
     const lastPart = lastAssistant.parts[lastAssistant.parts.length - 1]
     if (lastPart.type !== "tool") return
 
+    // 重新确认这一轮 idle 没有被新的用户消息打断。
+    if ((nudgeGeneration.get(sessionId) ?? 0) !== generation) return
+
     // AI 以工具调用结尾后 idle — 催促继续
     nudgeState.set(sessionId, { count: state.count + 1, lastTime: Date.now() })
     log("info", "session.idle 检测到工具调用后停止，发送催促", {
       sessionId, iteration: state.count + 1, maxIterations: deps.nudge.maxIterations,
     })
+
+    if ((nudgeGeneration.get(sessionId) ?? 0) !== generation) return
 
     await client.session.promptAsync({
       path: { id: sessionId },
