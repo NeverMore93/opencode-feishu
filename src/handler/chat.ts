@@ -11,6 +11,7 @@
  */
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
+import { randomUUID } from "node:crypto"
 import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
@@ -78,23 +79,35 @@ function traceLangfuseUser(
 }
 
 /**
- * 读取当前 OpenCode 配置中的模型名。
+ * 为当前 prompt 生成稳定的 user messageID。
  *
- * 这是 UI 增强信息，不是主链路必需，因此读取失败只返回 `undefined`，
- * 同时留下 error 日志供排查。
+ * 后续回读实际模型时，只认和这个 ID 关联出来的 assistant message，
+ * 避免把上一轮对话的模型误展示到当前卡片。
  */
-async function fetchModel(
+function createPromptMessageId(): string {
+  return randomUUID()
+}
+
+/**
+ * 从当前请求关联的 assistant message 读取实际执行模型。
+ *
+ * 这里优先信任运行结果本身的 `providerID/modelID`，
+ * 而不是配置里的默认模型，避免自动恢复或局部 override 后显示错误。
+ */
+async function fetchActualModel(
   client: OpencodeClient,
+  sessionId: string,
+  requestMessageIds: readonly string[],
   log: LogFn,
   query?: { directory?: string },
 ): Promise<string | undefined> {
   try {
-    const cfg = await client.config.get({ query })
-    const m = cfg?.data?.model
-    return typeof m === "string" ? m : undefined
+    const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
+    return extractAssistantModelForRequests(messages ?? [], requestMessageIds)
   } catch (err) {
-    // 模型信息只影响卡片辅助展示，但异常仍要留下 error 日志。
-    log("error", "读取当前模型配置失败", {
+    // 模型信息只影响卡片辅助展示；读取失败时回退为不展示模型。
+    log("error", "读取本次 assistant 实际模型失败", {
+      sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
     return undefined
@@ -122,8 +135,11 @@ async function finalizeReply(
   placeholderId: string,
   text: string,
   log: LogFn,
+  actualModel?: string,
 ): Promise<void> {
   if (streamingCard) {
+    // 只在收尾时写入最终确认过的实际模型，流式阶段保持不展示。
+    streamingCard.setResolvedModel(actualModel)
     await streamingCard.close(text)
   } else {
     await replyOrUpdate(feishuClient, chatId, placeholderId, text, log)
@@ -191,6 +207,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   const thinkingDelay = config.thinkingDelay
   const pollInterval = config.pollInterval
   const stablePolls = config.stablePolls
+  // 当前用户可见这一轮可能会产生多次 prompt（原始尝试 + 自动恢复），统一记录它们的 messageID。
+  const requestMessageIds: string[] = []
 
   let placeholderId = ""
   // `done` 用于避免 thinking timer 在主流程已结束后再异步发出占位消息。
@@ -204,7 +222,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       streamingCard = new StreamingCard(deps.cardkit, feishuClient, chatId, log, {
         sessionId: session.id,
         directory,
-        model: await fetchModel(client, log, query),
       })
       placeholderId = await streamingCard.start()
     } catch (err) {
@@ -297,11 +314,13 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   try {
     // 清除前次遗留的 session error 缓存，避免 pollForResponse 误检测旧错误。
     clearSessionError(session.id)
+    const requestMessageId = createPromptMessageId()
+    requestMessageIds.push(requestMessageId)
 
     await client.session.promptAsync({
       path: { id: session.id },
       query,
-      body: baseBody,
+      body: { ...baseBody, messageID: requestMessageId },
     })
 
     const finalText = await pollForResponse(client, session.id, { timeout, pollInterval, stablePolls, query, signal })
@@ -315,7 +334,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     // prompt 成功：清空该 sessionKey 的自动恢复计数。
     clearRetryAttempts(sessionKey)
 
-    await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时", log)
+    const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+    await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, finalText || "⚠️ 响应超时", log, actualModel)
   } catch (err) {
     // 提取会话错误信息（来自 SessionErrorDetected 或 SSE 缓存）
     const sessionError = extractSessionError(err, session.id)
@@ -335,14 +355,18 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     // 只有拿到了结构化 sessionError，才尝试做模型错误恢复。
     if (sessionError) {
       try {
+        const recoveryRequestMessageId = createPromptMessageId()
+        requestMessageIds.push(recoveryRequestMessageId)
         const recovery = await tryModelRecovery({
           sessionError, sessionId: session.id, sessionKey, client, directory,
+          requestMessageId: recoveryRequestMessageId,
           parts, timeout, pollInterval, stablePolls, query, signal, log,
           poll: pollForResponse,
         })
 
         if (recovery.recovered) {
-          await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, recovery.text || "⚠️ 响应超时", log)
+          const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+          await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, recovery.text || "⚠️ 响应超时", log, actualModel)
           return
         }
         displayError = recovery.sessionError
@@ -359,7 +383,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       error: thrownError,
       ...(displayError ? { sessionError: displayError.message } : {}),
     })
-    await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, "❌ " + errorMessage, log)
+    const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+    await finalizeReply(streamingCard, feishuClient, chatId, placeholderId, "❌ " + errorMessage, log, actualModel)
   } finally {
     done = true
     // 无论成功失败，都要把延迟占位计时器、订阅和 pending 状态回收掉。
@@ -588,4 +613,42 @@ function extractLastAssistantText(
     .map((p) => p.text ?? "")
     .join("\n")
     .trim()
+}
+
+/**
+ * 从当前请求关联的 assistant message 提取真实执行模型。
+ *
+ * 这里只认 `parentID` 命中的 assistant message，
+ * 避免把历史轮次的模型串到当前卡片里。
+ */
+function extractAssistantModelForRequests(
+  messages: Array<{
+    info: {
+      role?: string
+      parentID?: unknown
+      providerID?: unknown
+      modelID?: unknown
+      [key: string]: unknown
+    }
+  }>,
+  requestMessageIds: readonly string[],
+): string | undefined {
+  if (requestMessageIds.length === 0) return undefined
+  const requestIdSet = new Set(requestMessageIds)
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const assistant = messages[index]?.info
+    if (assistant?.role !== "assistant") continue
+
+    const parentID = typeof assistant.parentID === "string" ? assistant.parentID.trim() : ""
+    if (!parentID || !requestIdSet.has(parentID)) continue
+
+    const providerID = typeof assistant.providerID === "string" ? assistant.providerID.trim() : ""
+    const modelID = typeof assistant.modelID === "string" ? assistant.modelID.trim() : ""
+    if (!providerID || !modelID) return undefined
+
+    return `${providerID}/${modelID}`
+  }
+
+  return undefined
 }
