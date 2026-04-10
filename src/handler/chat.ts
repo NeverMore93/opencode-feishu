@@ -645,7 +645,8 @@ function extractAssistantModelForRequests(
 
     const providerID = typeof assistant.providerID === "string" ? assistant.providerID.trim() : ""
     const modelID = typeof assistant.modelID === "string" ? assistant.modelID.trim() : ""
-    if (!providerID || !modelID) return undefined
+    // 同一轮里可能先出现一个尚未补全模型字段的 assistant 记录，此时继续向前找稳定记录。
+    if (!providerID || !modelID) continue
 
     return `${providerID}/${modelID}`
   }
