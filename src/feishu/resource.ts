@@ -1,9 +1,13 @@
 /**
- * 飞书消息资源下载：将图片、文件、音频等资源转换为 data URL
+ * 飞书资源下载层：把消息里的文件/图片/音频拉下来并转成 data URL。
+ *
+ * 之所以统一转成 data URL，是为了后续能直接塞进 OpenCode file parts，
+ * 不依赖临时文件或额外公网地址。
  */
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { LogFn } from "../types.js"
 
+/** 下载成功后的标准资源结构。 */
 export interface DownloadedResource {
   /** data:<mime>;base64,<data> */
   dataUrl: string
@@ -11,16 +15,23 @@ export interface DownloadedResource {
   filename?: string
 }
 
+/** 下载流程的统一结果。 */
 export interface DownloadResult {
+  /** 下载成功时的资源；失败则为 null。 */
   resource: DownloadedResource | null
+  /** 失败原因枚举，便于上层生成更友好的提示。 */
   reason: "ok" | "too_large" | "error"
+  /** 下载超限时记录当时累计字节数。 */
   totalSize?: number
 }
 
 /**
- * 下载飞书消息中的资源文件，返回 data URL
+ * 下载飞书消息中的资源并返回 data URL。
  *
- * 使用 im.messageResource.get API，支持图片、文件、音频、视频
+ * 核心策略：
+ * - 使用流式读取，边下边统计大小
+ * - 一旦超过 `maxSize` 立刻中断，避免把大文件完整拉进内存
+ * - 不把错误向上抛，而是统一折叠成 `DownloadResult`
  */
 export async function downloadMessageResource(
   client: InstanceType<typeof Lark.Client>,
@@ -37,7 +48,7 @@ export async function downloadMessageResource(
     })
 
     if (!res) {
-      log("warn", "资源下载返回空数据", { messageId, fileKey, type })
+      log("error", "资源下载返回空数据", { messageId, fileKey, type })
       return { resource: null, reason: "error" }
     }
 
@@ -46,10 +57,12 @@ export async function downloadMessageResource(
     let totalSize = 0
 
     for await (const chunk of stream) {
+      // 兼容 Buffer 和 Uint8Array 两种 chunk 形态。
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array)
       totalSize += buf.length
       if (totalSize > maxSize) {
-        log("warn", "资源过大，跳过下载", { messageId, fileKey, totalSize, maxSize })
+        log("error", "资源过大，跳过下载", { messageId, fileKey, totalSize, maxSize })
+        // 主动销毁流，尽快释放网络和内存占用。
         stream.destroy()
         return { resource: null, reason: "too_large", totalSize }
       }
@@ -64,7 +77,7 @@ export async function downloadMessageResource(
 
     return { resource: { dataUrl, mime: contentType }, reason: "ok" }
   } catch (err) {
-    log("warn", "资源下载失败", {
+    log("error", "资源下载失败", {
       messageId,
       fileKey,
       type,
@@ -74,12 +87,18 @@ export async function downloadMessageResource(
   }
 }
 
+/**
+ * 响应头缺失时，根据资源类别给一个保守 MIME 默认值。
+ */
 function guessMimeByType(type: "image" | "file"): string {
   return type === "image" ? "image/png" : "application/octet-stream"
 }
 
 /**
- * 根据文件名推断 MIME 类型
+ * 根据文件名扩展名推断 MIME 类型。
+ *
+ * 这份映射主要用于“服务端只返回 octet-stream”时给上层二次判断，
+ * 例如决定是否把文件按文本内联给 OpenCode。
  */
 export function guessMimeByFilename(filename: string): string {
   const ext = filename.split(".").pop()?.toLowerCase() ?? ""

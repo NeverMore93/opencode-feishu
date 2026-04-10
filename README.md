@@ -66,19 +66,19 @@ opencode
 |------|------|:----:|--------|------|
 | `appId` | string | 是 | — | 飞书应用 App ID |
 | `appSecret` | string | 是 | — | 飞书应用 App Secret |
-| `timeout` | number | 否 | `120000` | AI 响应超时（毫秒） |
+| `timeout` | number | 否 | `未设置` | 对话轮询总超时（毫秒）；未配置时不设固定超时，持续等待直到响应稳定、检测到 SSE 错误或请求被中断 |
 | `thinkingDelay` | number | 否 | `2500` | 发送"正在思考…"前的延迟（毫秒），设为 0 禁用 |
 | `logLevel` | string | 否 | `"info"` | 日志级别：fatal/error/warn/info/debug/trace |
-| `maxHistoryMessages` | number | 否 | `200` | 入群时拉取历史消息的最大条数 |
+| `maxHistoryMessages` | number | 否 | `200` | 入群时最多摄入的历史消息条数（飞书接口按 50/页分页拉取） |
 | `pollInterval` | number | 否 | `1000` | 轮询 AI 响应的间隔（毫秒） |
 | `stablePolls` | number | 否 | `3` | 连续几次轮询内容不变视为回复完成 |
 | `dedupTtl` | number | 否 | `600000` | 消息去重缓存过期时间（毫秒） |
 | `maxResourceSize` | number | 否 | `524288000` | 单个资源最大下载大小（字节，默认 500MB） |
-| `directory` | string | 否 | `""` | 默认工作目录，支持 `~` 和 `${ENV_VAR}` 展开 |
-| `nudge.enabled` | boolean | 否 | `false` | 启用 session.idle 催促（AI 工具调用后停止时自动发送催促消息） |
+| `directory` | string | 否 | `OpenCode 当前工作目录` | 默认工作目录，支持 `~` 和 `${ENV_VAR}` 展开；若 OpenCode 未提供则为空字符串 |
+| `nudge.enabled` | boolean | 否 | `false` | 启用 session.idle 催促；命中条件时向 OpenCode 发送 synthetic prompt，而不是直接向飞书新增可见消息 |
 | `nudge.intervalSeconds` | number | 否 | `30` | 同一 session 连续催促的最小间隔（秒） |
 | `nudge.maxIterations` | number | 否 | `3` | 同一 session 最大催促次数（用户新消息后重置） |
-| `nudge.message` | string | 否 | `"上一步操作已完成。请继续执行下一步..."` | 催促消息内容 |
+| `nudge.message` | string | 否 | `"上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。"` | 发送给 OpenCode 的 synthetic prompt 内容 |
 
 ## 特性
 
@@ -92,7 +92,7 @@ opencode
 - **群聊静默监听** — 所有群消息作为上下文积累，仅 @提及时回复
 - **FIFO 消息队列** — P2P 和群聊统一串行队列，消息按顺序处理不互相中断
 - **入群自动摄入历史消息**
-- **session.idle 催促** — AI 工具调用后停止时按需催促继续（可配置）
+- **session.idle 催促** — 仅在工具调用后停止时，按需向 OpenCode 注入 synthetic prompt 继续执行（可配置）
 - **Langfuse 用户关联** — 每条消息 fire-and-forget 发送 trace 到 Langfuse，关联 sessionId 和飞书 userId
 - **代理支持** — `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`
 - **消息去重** — 可配置 TTL（默认 10 分钟）

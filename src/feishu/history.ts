@@ -1,5 +1,8 @@
 /**
- * 群聊历史上下文摄入：bot 被拉入群聊时，读取历史消息并发送给 OpenCode 作为上下文
+ * 群聊历史上下文摄入。
+ *
+ * 当 bot 被新拉入群聊时，这个模块会补录一段历史消息给 OpenCode，
+ * 让后续对话一开始就拥有最基本的背景信息。
  */
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk"
@@ -7,6 +10,7 @@ import type { LogFn } from "../types.js"
 import { buildSessionKey, getOrCreateSession } from "../session.js"
 import { describeMessageType } from "./content-extractor.js"
 
+/** 历史消息的轻量归一化结构。 */
 interface HistoryMessage {
   senderType: string
   senderId: string
@@ -14,10 +18,13 @@ interface HistoryMessage {
   createTime: string
 }
 
+/** 单次调用飞书 list 接口时的页面大小上限。 */
 const DEFAULT_PAGE_SIZE = 50
 
 /**
- * 拉取群聊历史消息并注入 OpenCode 会话作为背景上下文
+ * 拉取群聊历史消息并注入 OpenCode 会话。
+ *
+ * 整个过程不会触发 AI 回复，只会把内容作为 `noReply` 上下文同步进去。
  */
 export async function ingestGroupHistory(
   feishuClient: InstanceType<typeof Lark.Client>,
@@ -34,21 +41,21 @@ export async function ingestGroupHistory(
 
   log("info", "开始摄入群聊历史上下文", { chatId, maxMessages })
 
-  // 1. 拉取历史消息
+  // 1. 先从飞书侧拉取最近历史消息。
   const messages = await fetchRecentMessages(feishuClient, chatId, maxMessages, log)
   if (!messages.length) {
     log("info", "群聊无历史消息，跳过摄入", { chatId })
     return
   }
 
-  // 2. 获取/创建 OpenCode 会话
+  // 2. 复用该群聊对应的 OpenCode 会话。
   const sessionKey = buildSessionKey("group", chatId)
   const session = await getOrCreateSession(opencodeClient, sessionKey, directory)
 
-  // 3. 格式化为上下文文本
+  // 3. 把历史消息格式化成一段连续的上下文文本。
   const contextText = formatHistoryAsContext(messages)
 
-  // 4. 发送到 OpenCode（noReply: true，仅记录上下文，不触发 AI 回复）
+  // 4. 以 noReply 方式送入 OpenCode，只记上下文，不要求模型立即回应。
   await opencodeClient.session.promptAsync({
     path: { id: session.id },
     query,
@@ -62,7 +69,12 @@ export async function ingestGroupHistory(
 }
 
 /**
- * 通过飞书 API 拉取群聊最近的文本消息
+ * 通过飞书 API 分页拉取群聊最近消息。
+ *
+ * 返回值已经做过：
+ * - 删除消息过滤
+ * - 空内容过滤
+ * - 消息类型转文本描述
  */
 async function fetchRecentMessages(
   client: InstanceType<typeof Lark.Client>,
@@ -89,12 +101,13 @@ async function fetchRecentMessages(
       if (!items || items.length === 0) break
 
       for (const item of items) {
+        // 已删除或无正文的消息没有摄入价值。
         if (item.deleted) continue
         if (!item.body?.content) continue
 
         const msgType = item.msg_type ?? "text"
         const rawContent = item.body.content
-        const text = describeMessageType(msgType, rawContent)
+        const text = describeMessageType(msgType, rawContent, log)
         if (!text) continue
 
         result.push({
@@ -107,23 +120,24 @@ async function fetchRecentMessages(
         if (result.length >= maxMessages) break
       }
 
+      // 飞书服务端已无更多页时结束。
       if (!res?.data?.has_more) break
       pageToken = res.data.page_token ?? undefined
     }
   } catch (err) {
-    log("warn", "拉取群聊历史消息失败", {
+    log("error", "拉取群聊历史消息失败", {
       chatId,
       error: err instanceof Error ? err.message : String(err),
     })
   }
 
-  // API 返回倒序（最新在前），翻转为正序（最早在前）
+  // API 返回倒序（最新在前），翻转为正序（最早在前），更适合模型顺序阅读。
   result.reverse()
   return result
 }
 
 /**
- * 将历史消息格式化为上下文文本
+ * 将历史消息格式化为适合 prompt 注入的文本。
  */
 function formatHistoryAsContext(messages: HistoryMessage[]): string {
   const header = [
@@ -134,9 +148,11 @@ function formatHistoryAsContext(messages: HistoryMessage[]): string {
 
   const body = messages
     .map((m) => {
+      // 时间统一转成中文可读格式，帮助模型理解先后关系。
       const time = m.createTime
         ? new Date(Number(m.createTime)).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })
         : "unknown"
+      // app 发送者通常是机器人或系统实体，单独标记。
       const senderLabel = m.senderType === "app" ? "[Bot]" : `[${m.senderId}]`
       return `[${time}] ${senderLabel}: ${m.content}`
     })
