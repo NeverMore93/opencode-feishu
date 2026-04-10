@@ -116,16 +116,11 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
     └── startFeishuGateway(larkClient) → 启动 WebSocket 长连接（复用 Client）
         ├── im.message.receive_v1 → enqueueMessage() [session-queue]
         │   ├── shouldReply=false → handleChat() 静默转发（绕过队列）
-        │   ├── P2P + shouldReply=true → 可中断策略（abort + 立即处理新消息）
-        │   │   └── handleChat() → 返回 AutoPromptContext
-        │   │       └── runP2PAutoPrompt(signal) → abortableSleep + 单次迭代 + 空闲检测
-        │   └── Group + shouldReply=true → 串行排队（FIFO 顺序依次处理）
-        │       └── drainLoop: Phase 1 用户消息 → Phase 2 空闲 auto-prompt
-        │           ├── handleChat(ctx, deps, signal) → 返回 AutoPromptContext
-        │           │   ├── StreamingCard.start() → 流式卡片（fallback 纯文本占位）
-        │           │   ├── subscribe(action-bus) → text/tool/permission/question 更新卡片
-        │           │   └── promptAsync() → 轮询（session.idle 提前退出）→ card.close()
-        │           └── 队列空 → sleep(1s 粒度检查队列) → runOneAutoPromptIteration → 空闲检测
+        │   └── shouldReply=true → 按 sessionKey 进入统一 FIFO 串行队列
+        │       └── handleChat(ctx, deps, signal?)
+        │           ├── StreamingCard.start() → 流式卡片（fallback 纯文本占位）
+        │           ├── subscribe(action-bus) → text/tool/permission/question 更新卡片
+        │           └── promptAsync() → 轮询（session.idle 提前退出）→ card.close()
         ├── im.chat.member.bot.added_v1 → ingestGroupHistory()
         └── card.action.trigger → handleCardAction() → v2Client.permission/question.reply()
     event 钩子 → handleEvent()
@@ -151,32 +146,26 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 创建 `WSClient`（WebSocket 长连接，独立代理配置）
 - 处理 `im.message.receive_v1` 事件
 - 处理 `card.action.trigger` 卡片回调（权限/问答按钮，3 秒内返回 toast）
-- 消息去重（10 分钟窗口，通过 `dedup.ts`）
+- 消息去重（默认 10 分钟，可通过 `dedupTtl` 配置，通过 `dedup.ts`）
 - 群消息 @提及过滤（通过 `group-filter.ts`）
 - 处理 `im.chat.member.bot.added_v1` 用于历史摄入
 
 **消息队列调度器 (`src/handler/session-queue.ts`):**
-- per-sessionKey 并发控制，防止占位消息竞态覆盖
-- P2P 可中断策略：`AbortController.abort()` + `session.abort()` 中断当前处理 + auto-prompt 后续阶段
-- 群聊串行排队策略：FIFO 顺序依次处理，所有 @bot 消息都得到回复
-- 群聊 auto-prompt：`drainLoop` 队列耗尽后进入空闲 auto-prompt 阶段，每秒检查队列实现用户消息优先
-- P2P auto-prompt：`runP2PAutoPrompt` 使用 `abortableSleep` 可被新消息 abort 中断
+- per-sessionKey FIFO 串行处理，防止占位消息/流式卡片并发覆盖
+- 单聊和群聊统一采用顺序消费模型，避免 IM 场景里的“新消息打断旧消息”造成残留撤回或丢回复
 - 静默消息（shouldReply=false）完全绕过队列
+- 队列只负责用户消息串行化；`session.idle` 之后的催促由 `event.ts` 的 nudge 逻辑驱动
 - 暴露 `enqueueMessage()` 作为唯一入口
 
 **对话处理器 (`src/handler/chat.ts`):**
 - 使用 `client.session.promptAsync()` 异步发送消息（不阻塞）
-- 接受可选 `signal?: AbortSignal` 参数，支持被队列中断
-- 返回 `AutoPromptContext | undefined`：供 session-queue 驱动 auto-prompt 后续阶段
+- 接受可选 `signal?: AbortSignal` 参数，为轮询等待等可取消路径保留统一签名
 - 会话键格式：`feishu-p2p-<userId>` 或 `feishu-group-<chatId>`
 - 会话标题格式：`Feishu-<sessionKey>-<timestamp>`
 - 静默监听模式：`promptAsync({ noReply: true })`
 - 主动回复模式：`StreamingCard.start()` → action-bus 订阅 → 轮询（session.idle 提前退出）→ `card.close()`
-- `runOneAutoPromptIteration()`：单次 auto-prompt 迭代（发送提示 → poll → 空闲检测 → 发送有效响应）
-- `isIdleResponse()`：双重条件空闲检测（长度 < idleMaxLength AND 关键词匹配）
 - action-bus 订阅：text-updated → 卡片文本更新、tool-state-changed → 工具进度、permission/question → 交互卡片
 - StreamingCard 回退：CardKit 创建失败时自动降级为纯文本占位消息
-- AbortError 处理：被中断时调用 `card.destroy()` 删除消息，静默退出
 
 **事件处理器 (`src/handler/event.ts`):**
 - 处理 `message.part.updated`：实时更新占位消息 + emit `text-updated`/`tool-state-changed` 到 action-bus
@@ -191,8 +180,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 **事件总线 (`src/handler/action-bus.ts`):**
 - per-session 事件订阅/发布：`subscribe(sessionId, cb)` 返回 unsubscribe 函数
 - `emit(sessionId, action)` fire-and-forget 分发，错误不阻塞
-- `unsubscribeAll(sessionId)` 清理所有订阅
-- `ProcessedAction` 联合类型：7 种事件（text-updated、tool-state-changed、subtask-discovered、permission-requested、question-requested、session-idle、session-error）
+- `ProcessedAction` 联合类型：5 种事件（text-updated、tool-state-changed、permission-requested、question-requested、session-idle）
 
 **交互处理器 (`src/handler/interactive.ts`):**
 - `handlePermissionRequested`/`handleQuestionRequested`：使用 `buildCardFromDSL` 构建交互卡片并发送到飞书
@@ -220,7 +208,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - `truncateMarkdown(text, limit)`：截断到 28KB 并添加提示后缀
 
 **历史摄入 (`src/feishu/history.ts`):**
-- 通过飞书 API 获取最近 50 条群消息
+- 通过飞书 API 按 `maxHistoryMessages` 拉取最近群消息（单次请求 50 条分页）
 - 以 `noReply: true` 发送到 OpenCode（仅上下文）
 
 **消息发送器 (`src/feishu/sender.ts`):**
@@ -240,9 +228,9 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 供 feishu_send_card tool 和 system prompt 注入使用
 
 **辅助模块：**
-- `src/feishu/dedup.ts` - 10 分钟消息去重窗口
+- `src/feishu/dedup.ts` - 消息去重窗口（默认 10 分钟，可通过 `dedupTtl` 配置）
 - `src/feishu/group-filter.ts` - @提及检测
-- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, ProcessedAction）
+- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, PermissionRequest, QuestionRequest）
 
 ## 配置
 
@@ -250,22 +238,33 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 **1. OpenCode 插件声明**（`~/.config/opencode/opencode.json`）：
 ```json
-{ "plugin": ["opencode-feishu"] }
+{ "plugin": ["D:/path/to/opencode-feishu"] }
 ```
 
 **2. 飞书配置**（`~/.config/opencode/plugins/feishu.json`）：
 ```json
 {
   "appId": "cli_xxxxxxxxxxxx",
-  "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "timeout": 120000,
-  "thinkingDelay": 2500
+  "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 }
 ```
 
 必需字段：`appId`, `appSecret`
-可选字段：`timeout`（默认 120000ms）、`thinkingDelay`（默认 2500ms）、`logLevel`（默认 `"info"`，控制 Lark SDK 日志级别）
-自动提示：`autoPrompt` 对象 — `enabled`（默认 false）、`intervalSeconds`（默认 30）、`maxIterations`（默认 10）、`message`（默认 "请同步当前进度，如需帮助请说明"）、`idleThreshold`（连续空闲次数阈值，默认 2）、`idleMaxLength`（空闲判定文本长度上限，默认 50）
+可选字段：
+- `timeout`：对话轮询总超时（毫秒）；默认不设置固定超时。仅在显式配置时，超时后返回 `⚠️ 响应超时`
+- `thinkingDelay`：默认 `2500ms`
+- `logLevel`：默认 `"info"`，控制 Lark SDK 日志级别
+- `maxHistoryMessages`：默认 `200`，最大 `500`；飞书接口按每页 `50` 条分页拉取
+- `pollInterval`：默认 `1000ms`
+- `stablePolls`：默认 `3`
+- `dedupTtl`：默认 `600000ms`
+- `maxResourceSize`：默认 `500MB`，最大 `500MB`
+- `directory`：默认使用 OpenCode 当前工作目录（`ctx.directory`）；若 OpenCode 未提供则为空字符串；支持 `~` 和 `${ENV_VAR}` 展开
+- `nudge.enabled`：默认 `false`
+- `nudge.message`：默认“上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。”
+- `nudge.intervalSeconds`：默认 `30`
+- `nudge.maxIterations`：默认 `3`
+- `nudge` 真实行为：仅在 `session.idle` 且最后一条 assistant message 以 `tool` part 结尾时，向 OpenCode 发送 `synthetic prompt`；不会直接向飞书用户新增一条可见消息
 
 ## 群聊行为
 
@@ -281,7 +280,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 
 ### 入群历史摄入
 - 由 `im.chat.member.bot.added_v1` 事件触发
-- 获取群聊最近 50 条消息
+- 按 `maxHistoryMessages` 拉取最近群消息（飞书接口按 50/页分页）
 - 以 `noReply: true` 发送所有消息到 OpenCode（仅上下文）
 
 ## 消息流程变体
@@ -292,7 +291,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 | 群聊 + 被 @提及 | 是 | 否 | 是 |
 | 群聊 + 未被 @提及 | 是 | **是** | **否** |
 | Bot 加入群（历史） | 是 | **是** | **否** |
-| 自动提示循环 | 是（"继续"） | 否 | 是（有效响应）/ 否（空闲响应） |
+| session.idle 催促 | 是（synthetic prompt） | 否 | 否（仅驱动 OpenCode 继续执行） |
 
 ## TypeScript 配置
 
@@ -322,8 +321,8 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 ## 错误处理
 
 - `open_id` 获取失败：直接抛出错误，阻止插件启动
-- 提示超时：`timeout` 后返回"⚠️ 响应超时"
-- 消息去重：10 分钟窗口防止重复处理
+- 提示超时：仅在显式配置 `timeout` 时，超时后返回"⚠️ 响应超时"
+- 消息去重：按 `dedupTtl` 窗口防止重复处理（默认 10 分钟）
 - 飞书消息发送失败：尽力更新占位消息，回退到发送新消息
 - 所有错误向飞书用户发送友好消息（不静默失败）
 
@@ -337,7 +336,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 **L2 轮询期间 SSE 错误检测**（chat.ts pollForResponse）：每次 poll 周期检查 `getSessionError()`
 - `pollForResponse()` 在 sleep 后、API 调用前检查 SSE 缓存的 session error
 - 检测到错误时抛出 `SessionErrorDetected` 异常（携带 sessionError 信息），立即终止轮询
-- 使模型异步失败（prompt 成功但模型报错）在 ~1 秒内被检测，而非等待 120 秒超时
+- 使模型异步失败（prompt 成功但模型报错）在下一次轮询（默认约 1 秒）内被检测，而非依赖固定超时
 
 **L3 模型不兼容自动恢复**（chat.ts）：检测模型错误时用全局默认模型重试
 - `getGlobalDefaultModel()`：通过 `client.config.get()` 读取 `Config.model` 字段（如 `"aigw/claude-opus-4-6-v1"`），解析为 `{ providerID, modelID }`
@@ -345,11 +344,9 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 重试计数器：每 sessionKey 最多重试 2 次，防止无限循环；成功后重置计数
 - 全局默认模型未配置时，直接向用户显示错误，不重试
 
-**L4 并发控制**（session-queue.ts）：per-sessionKey 消息队列防止竞态
-- 私聊可中断：`AbortController.abort()` + `session.abort()` 中断当前处理，立即处理新消息
-- 群聊串行排队：FIFO 顺序依次处理，所有 @bot 消息都得到回复
+**L4 并发控制**（session-queue.ts）：per-sessionKey FIFO 消息队列防止竞态
+- 单聊和群聊统一串行排队，保证同一逻辑会话里的消息顺序稳定
 - 静默消息绕过队列：`shouldReply=false` 直接转发，不受队列影响
-- `AbortError` 处理：被中断时静默退出，不向用户发送错误
 - 使用 `promptAsync()` 异步发送（不再有 prompt() HTTP 错误与 SSE 的竞态问题）
 - 错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）
 
@@ -392,5 +389,5 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - **不使用公网 webhook**：仅使用飞书 WebSocket 长连接
 - **单一 OpenCode 实例**：作为插件运行在 OpenCode 进程内
 - **会话恢复**：依赖标题前缀匹配（修改标题的会话可能无法恢复）
-- **消息去重**：仅 10 分钟窗口
+- **消息去重**：按 `dedupTtl` 窗口处理，默认 10 分钟
 - **插件生命周期**：由 OpenCode 管理，无独立进程

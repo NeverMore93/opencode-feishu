@@ -1,5 +1,9 @@
 /**
- * feishu_send_card Tool：agent 驱动的一次性结构化卡片
+ * `feishu_send_card` Tool：允许 agent 主动往当前飞书会话发送结构化卡片。
+ *
+ * 它和 StreamingCard 的定位不同：
+ * - StreamingCard 用于“当前这次 AI 回复”的流式展示
+ * - feishu_send_card 用于 agent 主动发一条独立卡片消息
  */
 import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import { getChatIdBySession, getChatInfoBySession } from "../feishu/session-chat-map.js"
@@ -8,15 +12,26 @@ import { sendInteractiveCard } from "../feishu/sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { LogFn } from "../types.js"
 
+/** 复用插件工具系统自带的 schema 构造器。 */
 const z = tool.schema
 
+/** 飞书卡头支持的颜色模板。 */
 const TEMPLATE_COLORS = ["blue", "green", "orange", "red", "purple", "grey"] as const
 
+/** Tool 运行需要的最小依赖。 */
 interface SendCardDeps {
   feishuClient: InstanceType<typeof Lark.Client>
   log: LogFn
 }
 
+/**
+ * 创建 `feishu_send_card` 工具定义。
+ *
+ * 这个工具的本质是：
+ * 1. 从当前 sessionID 找到对应飞书聊天
+ * 2. 把 DSL 翻译成 Card 2.0 JSON
+ * 3. 通过 sender 发一条 interactive 消息
+ */
 export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
   return tool({
     description:
@@ -105,6 +120,7 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
         .describe("卡片正文区块列表"),
     },
     async execute(args, context) {
+      // Tool 执行发生在 OpenCode session 上下文里，需要先反查飞书 chatId。
       const chatId = getChatIdBySession(context.sessionID)
       if (!chatId) {
         deps.log("warn", "Agent 卡片发送跳过：sessionID 无飞书聊天映射", {
@@ -114,9 +130,11 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
         return "错误：当前会话不关联飞书聊天，无法发送卡片"
       }
 
+      // 尽量保留聊天类型信息；DSL 里的按钮回调需要知道自己来自单聊还是群聊。
       const chatInfo = getChatInfoBySession(context.sessionID)
       const card = buildCardFromDSL(args, chatId, chatInfo?.chatType ?? "p2p")
-      const result = await sendInteractiveCard(deps.feishuClient, chatId, card)
+      // Tool 主动发卡片也把 sender 层异常接到项目 error 日志，避免只有失败字符串没有日志上下文。
+      const result = await sendInteractiveCard(deps.feishuClient, chatId, card, deps.log)
 
       if (result.ok) {
         deps.log("info", "Agent 卡片已发送", {
@@ -128,7 +146,7 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
         return `卡片已发送：「${args.title}」`
       }
 
-      deps.log("warn", "Agent 卡片发送失败", {
+      deps.log("error", "Agent 卡片发送失败", {
         sessionId: context.sessionID,
         chatId,
         title: args.title,
@@ -139,6 +157,13 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
   })
 }
 
+/**
+ * actions 区块里单个按钮的输入定义。
+ *
+ * `actionPayload` 是内部增强字段：
+ * - agent 正常使用时不会看到它
+ * - 权限/问答卡片会借它注入专用 JSON 回调值
+ */
 export type ButtonInput = {
   text: string
   value: string
@@ -147,6 +172,11 @@ export type ButtonInput = {
   actionPayload?: object
 }
 
+/**
+ * 通用 section 输入定义。
+ *
+ * 一个 section 最终会被翻译成 1 个或多个 Card 2.0 元素。
+ */
 export type SectionInput = {
   type:
     | "markdown" | "divider" | "note" | "actions"
@@ -177,6 +207,14 @@ export type SectionInput = {
   title?: string
 }
 
+/**
+ * 把 DSL 翻译成 Card 2.0 JSON。
+ *
+ * 设计原则：
+ * - 上层输入用统一 DSL，屏蔽 Card 2.0 的细碎字段差异
+ * - 对飞书不存在的组件做“最相近组件”降级
+ * - 缺必要数据时返回空数组，避免生成无效元素
+ */
 export function buildCardFromDSL(
   args: { title: string; template: string; sections: readonly SectionInput[] },
   chatId: string,
@@ -191,15 +229,16 @@ export function buildCardFromDSL(
     },
     body: {
       elements: args.sections.flatMap((s) => {
+        // 每个 section 根据 type 翻译为对应的 Card 2.0 element。
         switch (s.type) {
           case "divider":
             return { tag: "hr" }
           case "note":
-            // Card 2.0 无 note 组件，用 div + plain_text 替代
+            // Card 2.0 无独立 note 组件，用 div + plain_text 近似替代。
             return { tag: "div", text: { tag: "plain_text", content: s.content ?? "" } }
           case "actions":
             if (!s.buttons?.length) return []
-            // Card 2.0 无 action 容器，用 column_set 横排按钮
+            // Card 2.0 无 action 容器，用 column_set 横排按钮。
             return {
               tag: "column_set",
               flex_mode: "none",
@@ -212,6 +251,7 @@ export function buildCardFromDSL(
                   tag: "button",
                   text: { tag: "plain_text", content: btn.text },
                   type: btn.style,
+                  // 未注入 actionPayload 时，默认把按钮点击转成一条 send_message 合成消息。
                   value: btn.actionPayload ?? {
                     action: "send_message",
                     chatId,
@@ -243,6 +283,7 @@ export function buildCardFromDSL(
             if (!s.columns?.length) return []
             return {
               tag: "table",
+              // 目前固定每页 10 条，避免超大表格在飞书里一次性展开过长。
               page_size: 10,
               columns: s.columns.map(c => ({ name: c.name, data_type: c.dataType ?? "text" })),
               rows: s.rows ?? [],
@@ -315,6 +356,7 @@ export function buildCardFromDSL(
           case "collapse":
             return {
               tag: "collapsible_panel",
+              // 默认折叠，避免卡片过长影响首屏可读性。
               expanded: false,
               header: { title: { tag: "plain_text", content: s.title ?? "" } },
               elements: [{ tag: "markdown", content: s.content ?? "" }],
