@@ -240,13 +240,19 @@ export class StreamingCard {
     if (!this.cardId || this.debugPanelAdded) return
 
     const toolCount = this.toolStates.size
-    const completedCount = [...this.toolStates.values()].filter((tool) => tool.state === "completed").length
-    const runningCount = [...this.toolStates.values()].filter((tool) => tool.state === "running").length
-    const errorCount = [...this.toolStates.values()].filter((tool) => tool.state === "error").length
-    const toolSummary = [...this.toolStates.values()].map((tool) => {
+    let completedCount = 0
+    let runningCount = 0
+    let errorCount = 0
+    const toolSummaryParts: string[] = []
+    // 单次遍历同时生成计数和摘要，避免对同一份工具状态做多次扫描。
+    for (const tool of this.toolStates.values()) {
       const icon = tool.state === "completed" ? "✅" : tool.state === "error" ? "❌" : "🔄"
-      return `${icon} ${tool.tool}`
-    }).join(" · ")
+      toolSummaryParts.push(`${icon} ${tool.tool}`)
+      if (tool.state === "completed") completedCount += 1
+      else if (tool.state === "running") runningCount += 1
+      else if (tool.state === "error") errorCount += 1
+    }
+    const toolSummary = toolSummaryParts.join(" · ")
 
     // 折叠标题直接保留完整模型名；拿不到实际模型时就完全不展示。
     const summaryParts = [this.meta?.model, `${toolCount} tools`].filter(Boolean)
