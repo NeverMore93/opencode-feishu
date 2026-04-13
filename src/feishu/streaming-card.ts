@@ -23,6 +23,7 @@ interface ToolState {
 export interface StreamingCardMeta {
   sessionId?: string
   directory?: string
+  /** 只展示最终确认过的实际模型；流式阶段保持为空。 */
   model?: string
 }
 
@@ -43,6 +44,8 @@ export class StreamingCard {
   private closed = false
   /** tools 元素是否已经动态插入过。 */
   private toolsElementAdded = false
+  /** 调试面板只应在收尾时追加一次。 */
+  private debugPanelAdded = false
 
   constructor(
     private readonly cardkit: CardKitClient,
@@ -56,9 +59,6 @@ export class StreamingCard {
    * 创建卡片实体并发到飞书聊天，返回对应的消息 ID。
    */
   async start(): Promise<string> {
-    // 底部元信息仅用于辅助定位上下文，不影响主要展示内容。
-    const footer = [this.meta?.sessionId, this.meta?.directory, this.meta?.model].filter(Boolean).join(" | ")
-
     const schema: CardKitSchema = {
       data: {
         schema: "2.0",
@@ -70,7 +70,6 @@ export class StreamingCard {
         body: {
           elements: [
             { tag: "markdown", element_id: "content", content: "正在思考..." },
-            ...(footer ? [{ tag: "div", text: { tag: "plain_text", content: footer } }] : []),
           ],
         },
       },
@@ -135,7 +134,25 @@ export class StreamingCard {
     // 先等之前的更新队列跑完，再写最终内容，避免顺序错乱。
     await this.drain()
     await this.doUpdateContent()
+    // 元信息不再抢正文位置；收尾时再附一个默认折叠的调试面板。
+    try {
+      await this.appendDebugPanel()
+    } catch (err) {
+      this.log("error", "追加 StreamingCard 调试面板失败", {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
     await this.cardkit.closeStreaming(this.cardId, ++this.seq)
+  }
+
+  /**
+   * 在收尾前写入本次 assistant 实际执行模型。
+   *
+   * 这里故意不在流式阶段展示模型，避免把配置值或尚未确认的临时值暴露给用户。
+   */
+  setResolvedModel(model: string | undefined): void {
+    if (!this.meta) return
+    this.meta.model = model
   }
 
   /**
@@ -210,5 +227,65 @@ export class StreamingCard {
         ++this.seq,
       )
     }
+  }
+
+  /**
+   * 在卡片底部追加一个默认折叠的调试面板。
+   *
+   * 这里刻意只在 close 时写入最终值：
+   * - 不让 session/path/model 抢占正文空间
+   * - 工具摘要只在收尾时给最终稳定值，避免流式阶段频繁跳动
+   */
+  private async appendDebugPanel(): Promise<void> {
+    if (!this.cardId || this.debugPanelAdded) return
+
+    const toolCount = this.toolStates.size
+    let completedCount = 0
+    let runningCount = 0
+    let errorCount = 0
+    const toolSummaryParts: string[] = []
+    // 单次遍历同时生成计数和摘要，避免对同一份工具状态做多次扫描。
+    for (const tool of this.toolStates.values()) {
+      const icon = tool.state === "completed" ? "✅" : tool.state === "error" ? "❌" : "🔄"
+      toolSummaryParts.push(`${icon} ${tool.tool}`)
+      if (tool.state === "completed") completedCount += 1
+      else if (tool.state === "running") runningCount += 1
+      else if (tool.state === "error") errorCount += 1
+    }
+    const toolSummary = toolSummaryParts.join(" · ")
+
+    // 折叠标题直接保留完整模型名；拿不到实际模型时就完全不展示。
+    const summaryParts = [this.meta?.model, `${toolCount} tools`].filter(Boolean)
+    const summaryTitle =
+      summaryParts.length > 0 ? `调试信息 · ${summaryParts.join(" · ")}` : "调试信息"
+
+    const detailLines: string[] = []
+    // 完整路径 / sessionId 只放在折叠详情里，默认不抢正文注意力，但需要时仍能展开查看。
+    if (this.meta?.directory) detailLines.push(`- 工作区：\`${this.meta.directory}\``)
+    if (this.meta?.model) detailLines.push(`- 模型：\`${this.meta.model}\``)
+    if (this.meta?.sessionId) detailLines.push(`- 会话：\`${this.meta.sessionId}\``)
+    detailLines.push(`- 工具数：\`${toolCount}\`（完成 ${completedCount} / 运行中 ${runningCount} / 失败 ${errorCount}）`)
+    if (toolSummary) detailLines.push(`- 工具摘要：${toolSummary}`)
+    // 总耗时目前只是本地 wall-clock 估算，不代表 SDK/模型真实执行时长，因此不对用户展示。
+
+    await this.cardkit.addElement(
+      this.cardId,
+      [{
+        tag: "collapsible_panel",
+        expanded: false,
+        header: {
+          title: {
+            tag: "plain_text",
+            content: summaryTitle,
+          },
+        },
+        elements: [{
+          tag: "markdown",
+          content: detailLines.join("\n"),
+        }],
+      }],
+      ++this.seq,
+    )
+    this.debugPanelAdded = true
   }
 }
