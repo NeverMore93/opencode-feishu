@@ -1,18 +1,27 @@
-<claude-mem-context>
-# Recent Activity
+# CLAUDE.md
 
-### Mar 5, 2026
+## 目录职责
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #554 | 11:07 PM | ✅ | Created comprehensive SDD specification for Feishu model switching feature | ~468 |
+- 本目录负责飞书渠道适配、消息发送、CardKit 结构和网关接入。
+- 它是 Feishu/Lark SDK 与插件内部模型之间的适配层和展示层。
 
-### Mar 12, 2026
+## 可以在这里放
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #1332 | 3:38 PM | 🔵 | Current User Experience Flow: Placeholder Updates vs Missing Interactive Features | ~1780 |
-| #1328 | " | 🔵 | Feishu WebSocket Gateway: Event Dispatcher and Message Filtering Pipeline | ~1018 |
-| #1325 | 3:36 PM | 🔵 | Message Content Extractor: Multi-Type Conversion with Dual-Path Architecture | ~1004 |
-| #1323 | 3:35 PM | 🔵 | Feishu Message API Wrapper: Send, Update, Delete Operations | ~475 |
-</claude-mem-context>
+- gateway、sender、CardKit 薄封装、结果卡投影、Markdown 清洗、群聊过滤、历史摄入等渠道相关代码。
+
+## 不要在这里放
+
+- 会话级业务编排、恢复策略、run 状态机。
+- 为了填满卡片而推断标题、摘要、结论等语义内容。
+
+## 修改约束
+
+- 用户可见卡片中的主内容应来自上游显式内容或稳定快照投影。
+- 这里允许存在 UI 壳层文案和渠道协议字段，但不应扩展成内容重写层。
+
+## 降级语义说明
+
+- `StreamingCard` 任一 CardKit 更新抛错后进入 `degraded` 状态。
+- degraded 后本地仍累积文本 / 工具状态到内存，但 **UI 不再刷新** — 用户看起来像“卡住”。
+- `close()` 时 drain 队列后抛 degraded 错误，让外层决定是否降级成纯文本尾消息。
+- 修改降级逻辑时注意区分“一次失败即降级”（当前语义）和“可容错重试”两种选择；改语义会直接影响用户感知到的稳定性。

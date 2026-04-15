@@ -1,34 +1,38 @@
-<claude-mem-context>
-# Recent Activity
+# CLAUDE.md
 
-### Mar 5, 2026
+## 目录职责
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #554 | 11:07 PM | ✅ | Created comprehensive SDD specification for Feishu model switching feature | ~468 |
-| #542 | 10:51 PM | 🔵 | Chat Handler Sends Prompts Without Model Specification | ~420 |
+- 本目录负责 OpenCode 会话、事件、交互和 run 生命周期编排。
+- 它连接输入、队列、SSE 事件、abort、终态冻结和错误收口。
 
-### Mar 9, 2026
+## 可以在这里放
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #712 | 3:28 PM | 🔵 | Feishu Plugin Chat Handler Architecture | ~403 |
+- chat、event、interactive、action-bus、session-queue、reply-run-registry 等编排代码。
 
-### Mar 10, 2026
+## 不要在这里放
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #954 | 3:02 PM | 🔴 | Added TTL to forkAttempts Map and cleaned up LogFn import | ~368 |
-| #953 | " | 🔴 | Fixed fork attempts tracking to use setForkAttempts for TTL management | ~353 |
-| #952 | " | 🔴 | Added 1-hour TTL to fork attempt counters | ~304 |
-| #944 | 2:55 PM | 🟣 | Added SSE race condition diagnostic logging | ~302 |
+- Feishu SDK 细节封装；那类代码进入 `src/feishu/`。
+- 通过 synthetic 输入或启发式补写去替 agent 生成主回复内容。
 
-### Mar 12, 2026
+## 修改约束
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #1332 | 3:38 PM | 🔵 | Current User Experience Flow: Placeholder Updates vs Missing Interactive Features | ~1780 |
-| #1326 | 3:37 PM | 🔵 | Session Queue: P2P Preemptive Interruption vs Group Serial Processing | ~1023 |
-| #1322 | 3:35 PM | 🔵 | Event Handler: Real-Time Updates and Error Caching with Message ID Filtering | ~1005 |
-| #1321 | 3:34 PM | 🔵 | Chat Handler Implementation: Auto-Prompt, Error Recovery, and Polling Architecture | ~862 |
-</claude-mem-context>
+- 对输入的增强仅限明确记录的最小必要上下文增强。
+- 对输出的加工仅限状态控制、终态冻结和展示投影，不应发展为语义总结器。
+
+## 隐性跨文件契约
+
+以下契约不靠类型强保证，修改任一侧必须同步另一侧，否则是静默 bug：
+
+### `mirrorTextToMessage`（chat.ts 写 / event.ts 读）
+
+- CardKit 不可用或 `StreamingCard.start()` 失败时，`chat.ts` 在 `thinkingDelay` 后会发一条纯文本“正在思考…”占位消息。
+- 该占位走 `registerPending({ placeholderId, feishuClient, mirrorTextToMessage: true })` 注册到 pending 表。
+- `event.ts` 处理 `message.part.updated` 时读该 flag：`true` 直接更新飞书文本消息；否则走 `streamingCard` 卡片更新。
+- 改 `chat.ts` 的 fallback 注册逻辑必须同步检查 `event.ts` 的 mirror 分支；反之亦然。该路径无法承载 abort 按钮，是有意的降级代价。
+
+### `expectedMessageId` 首条 SSE 锁（event.ts 内部契约）
+
+- `registerPending` 初始 `expectedMessageId` 为 `undefined`。
+- 首个 `message.part.updated` 事件到达时把 `part.messageID` 写入 `expectedMessageId`。
+- 之后所有 messageID 不匹配的事件**静默丢弃**，防止同一 session 内多 run 事件串线到当前卡片。
+- 依赖：`session-queue.ts` 的 per-sessionKey FIFO 串行保证首个事件属于当前 run。改队列或 pending 生命周期时必须保留“首锁 + 后过滤”语义。

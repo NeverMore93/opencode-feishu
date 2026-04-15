@@ -92,7 +92,7 @@ export class CardKitClient {
    * 更新指定 element 的 `content` 字段。
    *
    * 这是流式文本更新最常走的接口。
-   * 失败只记 error 日志，不抛错，避免 UI 更新失败反向影响主流程。
+   * 失败会抛错，由上层决定是继续结构化卡还是降级为文本回退。
    */
   async updateElement(
     cardId: string,
@@ -113,13 +113,13 @@ export class CardKitClient {
       })
 
       if (res?.code !== 0) {
-        // 飞书返回业务失败时不抛异常，只记录下来，继续主链路。
         this.log?.("error", "CardKit updateElement 失败", {
           cardId,
           elementId,
           code: res?.code,
           msg: res?.msg,
         })
+        throw new Error(`CardKit updateElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
       }
     } catch (err) {
       this.log?.("error", "CardKit updateElement 异常", {
@@ -127,6 +127,7 @@ export class CardKitClient {
         elementId,
         error: err instanceof Error ? err.message : String(err),
       })
+      throw err
     }
   }
 
@@ -140,10 +141,15 @@ export class CardKitClient {
     cardId: string,
     elements: Array<Record<string, unknown>>,
     sequence: number,
+    options?: {
+      position?: "append" | "insert_before" | "insert_after"
+      targetElementId?: string
+    },
   ): Promise<void> {
     const res = await this.larkClient.cardkit.v1.cardElement.create({
       data: {
-        type: "append",
+        type: options?.position ?? "append",
+        ...(options?.targetElementId ? { target_element_id: options.targetElementId } : {}),
         elements: JSON.stringify(elements),
         sequence,
       },
@@ -159,6 +165,101 @@ export class CardKitClient {
         msg: res?.msg,
       })
       throw new Error(`CardKit addElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
+    }
+  }
+
+  /**
+   * 以新组件全量替换指定 element。
+   *
+   * 对于按钮区、折叠面板这类无法只改 content 的组件，统一走这里。
+   */
+  async replaceElement(
+    cardId: string,
+    elementId: string,
+    element: Record<string, unknown>,
+    sequence: number,
+  ): Promise<void> {
+    const res = await this.larkClient.cardkit.v1.cardElement.update({
+      data: {
+        element: JSON.stringify(element),
+        sequence,
+      },
+      path: {
+        card_id: cardId,
+        element_id: elementId,
+      },
+    })
+
+    if (res?.code !== 0) {
+      this.log?.("error", "CardKit replaceElement 失败", {
+        cardId,
+        elementId,
+        code: res?.code,
+        msg: res?.msg,
+      })
+      throw new Error(`CardKit replaceElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
+    }
+  }
+
+  /**
+   * 以 partial_element 覆盖组件配置。
+   *
+   * 目前主要保留给后续对按钮 disabled/面板展开态的局部 patch。
+   */
+  async patchElement(
+    cardId: string,
+    elementId: string,
+    partialElement: Record<string, unknown>,
+    sequence: number,
+  ): Promise<void> {
+    const res = await this.larkClient.cardkit.v1.cardElement.patch({
+      data: {
+        partial_element: JSON.stringify(partialElement),
+        sequence,
+      },
+      path: {
+        card_id: cardId,
+        element_id: elementId,
+      },
+    })
+
+    if (res?.code !== 0) {
+      this.log?.("error", "CardKit patchElement 失败", {
+        cardId,
+        elementId,
+        code: res?.code,
+        msg: res?.msg,
+      })
+      throw new Error(`CardKit patchElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
+    }
+  }
+
+  /**
+   * 删除指定组件。
+   */
+  async deleteElement(
+    cardId: string,
+    elementId: string,
+    sequence: number,
+  ): Promise<void> {
+    const res = await this.larkClient.cardkit.v1.cardElement.delete({
+      data: {
+        sequence,
+      },
+      path: {
+        card_id: cardId,
+        element_id: elementId,
+      },
+    })
+
+    if (res?.code !== 0) {
+      this.log?.("error", "CardKit deleteElement 失败", {
+        cardId,
+        elementId,
+        code: res?.code,
+        msg: res?.msg,
+      })
+      throw new Error(`CardKit deleteElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
     }
   }
 

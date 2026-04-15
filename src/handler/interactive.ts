@@ -8,6 +8,13 @@ import * as sender from "../feishu/sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { TtlMap } from "../utils/ttl-map.js"
+import {
+  confirmAbortForRun,
+  getRunByRunId,
+  isTerminalRunState,
+  requestAbortForRun,
+  resetAbortForRun,
+} from "./reply-run-registry.js"
 
 /** 交互模块需要的外部依赖。 */
 export interface InteractiveDeps {
@@ -34,6 +41,14 @@ interface QuestionReplyActionValue {
   answers: string[][]
 }
 
+interface AbortReplyActionValue {
+  action: "abort_reply"
+  runId: string
+  sessionId: string
+  source?: string
+  cardVersion?: number
+}
+
 interface SendMessageActionValue {
   action: "send_message"
   text: string
@@ -48,6 +63,7 @@ interface SendMessageActionValue {
 export type ParsedCardActionValue =
   | PermissionReplyActionValue
   | QuestionReplyActionValue
+  | AbortReplyActionValue
   | SendMessageActionValue
 
 /**
@@ -116,6 +132,18 @@ export function parseCardActionValue(
         return undefined
       }
       return { action: "question_reply", requestId, answers }
+    }
+    case "abort_reply": {
+      const runId = typeof value.runId === "string" ? value.runId : ""
+      const sessionId = typeof value.sessionId === "string" ? value.sessionId : ""
+      if (!runId || !sessionId) return undefined
+      return {
+        action: "abort_reply",
+        runId,
+        sessionId,
+        source: typeof value.source === "string" ? value.source : undefined,
+        cardVersion: typeof value.cardVersion === "number" ? value.cardVersion : undefined,
+      }
     }
     case "send_message": {
       const text = typeof value.text === "string" ? value.text : ""
@@ -245,26 +273,84 @@ export interface CardActionData {
 export async function handleCardAction(
   action: CardActionData,
   deps: InteractiveDeps,
-): Promise<void> {
+): Promise<object | undefined> {
   const value = parseCardActionValue(action.actionValue, deps.log)
-  if (!value || value.action === "send_message") return
+  if (!value || value.action === "send_message") {
+    return buildCallbackResponse(action, deps.log)
+  }
+
+  if (value.action === "abort_reply") {
+    const abortResult = requestAbortForRun({
+      runId: value.runId,
+      sessionId: value.sessionId,
+      source: "card",
+    })
+    if (abortResult.outcome !== "accepted") {
+      return buildToast(
+        abortResult.outcome === "failed" ? "warning" : "info",
+        abortResult.feedback,
+      )
+    }
+
+    if (!deps.v2Client) {
+      deps.log("warn", "v2Client 未配置，无法向 OpenCode 发起 abort", {
+        runId: value.runId,
+        sessionId: value.sessionId,
+      })
+      resetAbortForRun(value.runId)
+      return buildToast("warning", "当前环境未启用中断能力")
+    }
+
+    try {
+      await deps.v2Client.session.abort({
+        sessionID: value.sessionId,
+      })
+      const latestRun = getRunByRunId(value.runId)
+      if (latestRun && isTerminalRunState(latestRun.state)) {
+        return buildToast("info", "当前回答已结束，无需中断")
+      }
+      confirmAbortForRun(value.runId)
+      return buildToast("success", abortResult.feedback)
+    } catch (err) {
+      resetAbortForRun(value.runId)
+      deps.log("error", "abort_reply 回调处理失败", {
+        runId: value.runId,
+        sessionId: value.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return buildToast("warning", "中断失败，请稍后重试")
+    }
+  }
+
   if (!deps.v2Client) {
     deps.log("warn", "v2Client 未配置，交互回调被忽略（按钮点击不会转发到 OpenCode）", {
       actionValue: action.actionValue,
     })
-    return
+    return buildCallbackResponse(action, deps.log)
   }
 
   try {
     if (value.action === "permission_reply") {
-      await deps.v2Client.permission.reply({
+      void deps.v2Client.permission.reply({
         requestID: value.requestId,
         reply: value.reply,
+      }).catch((err) => {
+        deps.log("error", "交互回调处理失败", {
+          action: value.action,
+          requestId: value.requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
       })
     } else {
-      await deps.v2Client.question.reply({
+      void deps.v2Client.question.reply({
         requestID: value.requestId,
         answers: value.answers,
+      }).catch((err) => {
+        deps.log("error", "交互回调处理失败", {
+          action: value.action,
+          requestId: value.requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
       })
     }
   } catch (err) {
@@ -274,6 +360,8 @@ export async function handleCardAction(
       error: err instanceof Error ? err.message : String(err),
     })
   }
+
+  return buildCallbackResponse(action, deps.log)
 }
 
 /**
@@ -302,6 +390,10 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
     }
   }
 
+  if (value.action === "abort_reply") {
+    return buildToast("success", "已接收中断请求，正在停止回答")
+  }
+
   if (value.action === "send_message") {
     return {
       toast: { type: "info", content: "📨 已发送" },
@@ -309,6 +401,10 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
   }
 
   return {}
+}
+
+function buildToast(type: "success" | "warning" | "info", content: string): object {
+  return { toast: { type, content } }
 }
 
 /**

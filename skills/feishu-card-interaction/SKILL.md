@@ -1,0 +1,50 @@
+---
+name: feishu-card-interaction
+description: Use when maintaining the Feishu card runtime prompt, reviewing whether Feishu card guidance stays capability-neutral, or updating the Feishu card tool contract and callback semantics.
+---
+
+# Feishu Card Interaction
+
+## 概述
+
+本技能描述飞书卡片渠道的运行时事实、工具契约和维护边界。
+它不负责规定 agent 何时发卡、如何组织内容、如何撰写标题/摘要/结论。
+
+## 文件分工
+
+- `prompt.md`：运行时最小提示。只允许放飞书渠道事实、工具契约、渲染约束和显式 non-goals。
+- `SKILL.md`：维护和评审文档。用于说明边界、约束和演进规则，不直接注入运行时会话。
+
+## 何时使用
+
+- 需要调整飞书会话的 runtime prompt。
+- 需要审查飞书插件是否越过“尽量透传，不影响 agent 内容性输入输出”的边界。
+- 需要更新 `feishu_send_card` 的能力说明、回调语义或兼容性约束。
+
+## 核心边界
+
+- 插件负责渠道承载、展示控制和交互回调。
+- agent 负责决定是否发卡，以及卡片中表达什么内容。
+- 运行时 prompt 只能描述事实和契约，不能规定输出策略。
+
+## 必须保持中性的内容
+
+- 当前渠道是飞书。
+- 可用工具是 `feishu_send_card`。
+- 独立卡片不会替代主回复。
+- 支持的 section、字段、回调和真实 abort 语义。
+- 已知限制、降级行为和长度约束。
+
+## 禁止写入 runtime prompt 的内容
+
+- 何时优先不用卡片，何时优先发卡。
+- 标题、摘要、结论应如何组织。
+- 首屏该展示什么、详细内容该如何折叠。
+- 按钮文案的推荐写法、推荐数量、推荐顺序。
+- 自检清单、启发式规则、展示偏好。
+
+## 维护检查
+
+- `prompt.md` 是否只包含事实、契约和 non-goals。
+- `prompt.md` 是否删除了“优先”“应该”“先……再……”这类策略性措辞。
+- 任何新增说明是否仍然服务于透传边界，而不是塑形 agent 内容。

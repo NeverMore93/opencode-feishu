@@ -114,10 +114,17 @@ export type LogFn = (
 export interface PermissionRequest {
   /** 请求唯一 ID，用于按钮回传。 */
   id?: string | number
+  /** 关联的 session。 */
+  sessionID?: string
   /** 权限名称。 */
   permission?: string
   /** 路径模式列表。 */
   patterns?: string[]
+  /** 若由工具调用触发，则会带上工具消息定位信息。 */
+  tool?: {
+    messageID?: string
+    callID?: string
+  }
 }
 
 /**
@@ -126,6 +133,8 @@ export interface PermissionRequest {
 export interface QuestionRequest {
   /** 请求唯一 ID。 */
   id?: string | number
+  /** 关联的 session。 */
+  sessionID?: string
   /** 问题数组；当前卡片实现只消费第一题。 */
   questions?: Array<{
     /** 问题正文。 */
@@ -135,4 +144,9 @@ export interface QuestionRequest {
     /** 用户可选选项。 */
     options?: Array<{ label?: string; value?: string }>
   }>
+  /** 若由工具调用触发，则会带上工具消息定位信息。 */
+  tool?: {
+    messageID?: string
+    callID?: string
+  }
 }

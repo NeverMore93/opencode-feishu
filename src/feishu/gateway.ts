@@ -30,7 +30,7 @@ export interface FeishuGatewayOptions {
   /** bot 被拉入群聊时触发（用于摄入历史上下文） */
   onBotAdded?: (chatId: string) => void | Promise<void>
   /** 卡片按钮点击回调 */
-  onCardAction?: (action: CardActionData) => Promise<void>
+  onCardAction?: (action: CardActionData) => Promise<object | undefined>
   log: LogFn
 }
 
@@ -310,17 +310,34 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           return buildCallbackResponse(action, log)
         }
 
-        // 其他交互统一走 onCardAction，后台异步处理，避免卡住飞书 3 秒响应窗口。
+        // 其他交互统一走 onCardAction；由上层决定是否同步返回更精确的 toast。
         if (onCardAction) {
-          void onCardAction(action).catch((err) => {
-            log("error", "card action 处理失败", {
-              error: err instanceof Error ? err.message : String(err),
+          const callbackResponse = await onCardAction(action)
+          const response = callbackResponse ?? buildCallbackResponse(action, log)
+          if (Object.keys(response).length === 0) {
+            log("warn", "card.action.trigger 收到未识别 action，返回 fallback toast", {
+              actionValue: action.actionValue?.slice(0, 200),
+              actionTag: action.actionTag,
+              chatId: action.chatId,
+              operatorId: action.operatorId,
             })
-          })
+            return { toast: { type: "info", content: "该按钮未配置对应行为，请联系会话发起者" } }
+          }
+          return response
         }
 
-        // 即时返回 toast
-        return buildCallbackResponse(action, log)
+        // 即时返回 toast；未识别的 action 返回 fallback toast。
+        const fallbackCheck = buildCallbackResponse(action, log)
+        if (Object.keys(fallbackCheck).length === 0) {
+          log("warn", "card.action.trigger 收到未识别 action，返回 fallback toast", {
+            actionValue: action.actionValue?.slice(0, 200),
+            actionTag: action.actionTag,
+            chatId: action.chatId,
+            operatorId: action.operatorId,
+          })
+          return { toast: { type: "info", content: "该按钮未配置对应行为，请联系会话发起者" } }
+        }
+        return fallbackCheck
       } catch (err) {
         log("error", "card.action.trigger 处理异常", {
           error: err instanceof Error ? err.message : String(err),

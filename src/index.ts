@@ -6,7 +6,7 @@
  * 2. 初始化 Lark SDK 客户端（token 管理、HTTP 调用）
  * 3. 获取 bot 自身 open_id（用于群聊 @提及检测）
  * 4. 启动飞书 WebSocket 长连接网关
- * 5. 注册 OpenCode 事件钩子（SSE 事件处理、tool 注册、system prompt 注入）
+ * 5. 注册 OpenCode 事件钩子（SSE 事件处理、tool 注册、最小运行时 prompt 注入）
  * 6. 导出 FeishuPlugin 供 OpenCode 加载
  *
  * 插件不是独立服务——由 OpenCode 管理其生命周期。
@@ -50,26 +50,35 @@ const LOG_PREFIX = "[feishu]"
 const isDebug = !!process.env.FEISHU_DEBUG
 
 /**
- * 从 skills/ 目录加载飞书交互决策指南（system prompt 片段）
+ * 从 skills/ 目录加载飞书运行时 prompt（system prompt 片段）。
  *
- * 该文件是 markdown 格式的 agent 指南，告知 AI 当前对话渠道为飞书，
- * 并提供 feishu_send_card 工具的使用说明。
+ * 这里只注入飞书渠道事实和工具契约，不注入任何会塑形 agent 输出策略的维护文档。
  * 内容在插件启动时读取一次，修改后重启即生效（无需重新构建）。
  *
- * @returns 飞书 system prompt 字符串；skill 文件缺失时返回最小化 fallback 提示
+ * @returns 飞书运行时 prompt 字符串；prompt 文件缺失时返回最小化 fallback 提示
  */
-function loadFeishuSkill(): string {
+function loadFeishuRuntimePrompt(): string {
   // 基于当前模块路径回溯到项目根目录下的 skills/ 文件夹
-  const skillPath = join(fileURLToPath(import.meta.url), "../../skills/feishu-card-interaction.md")
-  if (existsSync(skillPath)) {
-    return readFileSync(skillPath, "utf-8")
+  const promptPath = join(fileURLToPath(import.meta.url), "../../skills/feishu-card-interaction/prompt.md")
+  if (existsSync(promptPath)) {
+    return readFileSync(promptPath, "utf-8")
   }
-  // fallback：skill 文件缺失时使用最小提示，确保 agent 至少知道飞书渠道和可用工具
-  return "当前用户通过飞书（Feishu/Lark）与你对话。你可以使用 feishu_send_card 工具发送格式化卡片消息（支持按钮交互）。"
+  // fallback：prompt 文件缺失时使用最小提示，确保 agent 至少知道飞书渠道和工具边界
+  return [
+    "当前会话来自飞书（Feishu/Lark）。",
+    "",
+    "可用工具：`feishu_send_card`。",
+    "该工具会发送一条独立卡片消息，不替代当前主回复。",
+    "",
+    "工具约束：",
+    "- 仅使用工具 schema 明确支持的 section 和字段。",
+    "- 普通 actions 按钮不等于中断当前运行；只有存在专门 abort 回调时，才可视为中断。",
+    "- 该工具负责渲染你已经决定好的内容，不负责替你补全标题、摘要、结论或改写语义。",
+  ].join("\n")
 }
 
-/** 缓存的飞书 system prompt，在模块加载时一次性读取 */
-const feishuSystemPrompt = loadFeishuSkill()
+/** 缓存的飞书运行时 prompt，在模块加载时一次性读取 */
+const feishuRuntimePrompt = loadFeishuRuntimePrompt()
 
 /**
  * OpenCode 插件入口导出。
@@ -168,7 +177,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     onCardAction: async (action) => {
       if (!gateway) return
       // 交互按钮统一交给 interactive 层处理。
-      await handleCardAction(action, interactiveDeps)
+      return handleCardAction(action, interactiveDeps)
     },
     log,
   })
@@ -188,9 +197,9 @@ export const FeishuPlugin: Plugin = async (ctx) => {
       feishu_send_card: createSendCardTool({ feishuClient: larkClient, log }),
     },
     "experimental.chat.system.transform": async (input, output) => {
-      // 仅在飞书会话中注入提示，非飞书会话不干扰 agent
+      // 仅在飞书会话中注入最小运行时 prompt，非飞书会话不干扰 agent
       if (!input.sessionID || !getChatIdBySession(input.sessionID)) return
-      output.system.push(feishuSystemPrompt)
+      output.system.push(feishuRuntimePrompt)
 
       // 注入运行时上下文（工作目录 + 当前模型）
       const runtimeLines = [`当前工作目录: ${resolvedConfig.directory || ctx.directory || "未设置"}`]
