@@ -297,7 +297,8 @@ export function buildSimpleFallbackText(view: ReplyCardView): string {
   }
 
   if (view.terminalState) {
-    sections.push(`终态：${view.terminalState}`)
+    // 用本地化的 compactStatus 文案，避免把 enum 原值（completed/failed/aborted/…）泄露到用户可读面。
+    sections.push(`终态：${buildCompactStatus(view.terminalState)}`)
   }
 
   return truncateMarkdown(cleanMarkdown(sections.join("\n\n")))

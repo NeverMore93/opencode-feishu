@@ -221,8 +221,8 @@ export function handlePermissionRequested(
   request: PermissionRequest,
   chatId: string,
   deps: InteractiveDeps,
-  chatType: "p2p" | "group" = "p2p",
-  sessionId: string = "",
+  chatType: "p2p" | "group",
+  sessionId: string,
 ): void {
   const requestId = String(request.id ?? "")
   sendRequestCard({
@@ -244,8 +244,8 @@ export function handleQuestionRequested(
   request: QuestionRequest,
   chatId: string,
   deps: InteractiveDeps,
-  chatType: "p2p" | "group" = "p2p",
-  sessionId: string = "",
+  chatType: "p2p" | "group",
+  sessionId: string,
 ): void {
   const requestId = String(request.id ?? "")
   sendRequestCard({
@@ -334,53 +334,50 @@ export async function handleCardAction(
     return buildCallbackResponse(action, deps.log)
   }
 
-  try {
-    if (value.action === "permission_reply") {
-      void deps.v2Client.permission.reply({
-        requestID: value.requestId,
-        reply: value.reply,
-      }).catch((err) => {
-        deps.log("error", "交互回调处理失败", {
-          action: value.action,
-          requestId: value.requestId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      })
-    } else {
-      void deps.v2Client.question.reply({
-        requestID: value.requestId,
-        answers: value.answers,
-      }).catch((err) => {
-        deps.log("error", "交互回调处理失败", {
-          action: value.action,
-          requestId: value.requestId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      })
-    }
-  } catch (err) {
+  // 仅在 v2 API 确认成功后才把 detail phase 标记为 completed；失败时改为 error 避免误导用户以为已应答。
+  const phaseId = value.action === "permission_reply" ? "permission" : "question"
+  const label = value.action === "permission_reply" ? "等待授权" : "等待答复"
+  const successBody = value.action === "permission_reply" ? "用户已回应权限请求。" : "用户已回答问题。"
+  const failureBody = value.action === "permission_reply" ? "权限回调转发失败。" : "问答回调转发失败。"
+
+  const emitPhase = (status: "completed" | "error", body: string): void => {
+    emit(value.sessionId, {
+      type: "details-updated",
+      sessionId: value.sessionId,
+      phase: {
+        phaseId,
+        label,
+        status,
+        body,
+        updatedAt: new Date().toISOString(),
+      },
+    }, deps.log)
+  }
+
+  const onReplyFailed = (err: unknown): void => {
     deps.log("error", "交互回调处理失败", {
       action: value.action,
       requestId: value.requestId,
       error: err instanceof Error ? err.message : String(err),
     })
+    emitPhase("error", failureBody)
   }
 
-  // 立即把对应 detail phase 置为 completed，避免结果卡上"等待授权/等待答复"一直显示 running。
-  const phaseId = value.action === "permission_reply" ? "permission" : "question"
-  const label = value.action === "permission_reply" ? "等待授权" : "等待答复"
-  const body = value.action === "permission_reply" ? "用户已回应权限请求。" : "用户已回答问题。"
-  emit(value.sessionId, {
-    type: "details-updated",
-    sessionId: value.sessionId,
-    phase: {
-      phaseId,
-      label,
-      status: "completed",
-      body,
-      updatedAt: new Date().toISOString(),
-    },
-  }, deps.log)
+  try {
+    if (value.action === "permission_reply") {
+      void deps.v2Client.permission.reply({
+        requestID: value.requestId,
+        reply: value.reply,
+      }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
+    } else {
+      void deps.v2Client.question.reply({
+        requestID: value.requestId,
+        answers: value.answers,
+      }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
+    }
+  } catch (err) {
+    onReplyFailed(err)
+  }
 
   return buildCallbackResponse(action, deps.log)
 }

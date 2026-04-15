@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto"
 import { TtlMap } from "../utils/ttl-map.js"
 
-const RUN_CACHE_TTL = 10 * 60 * 1_000
+// 2h 足够覆盖一次超长对话的完整生命周期；archiveRun/createReplyRun 仍在 terminal 时显式清理。
+const RUN_CACHE_TTL = 2 * 60 * 60 * 1_000
 
 export type ReplyRunState =
   | "starting"
@@ -29,6 +30,8 @@ export interface ActiveReplyRun {
   requestMessageIds: string[]
   abortRequestedAt?: string
   abortSource?: "card" | "message" | "system"
+  /** 进入 aborting 前的非终态；abort 失败时用于恢复，避免硬重置到 running。 */
+  previousStateBeforeAbort?: ReplyRunState
   terminalState?: ReplyTerminalState
   controller: AbortController
 }
@@ -39,10 +42,9 @@ export interface AbortRequestResult {
   run?: ActiveReplyRun
 }
 
-// activeBySessionKey 正常流程在 archiveRun / createReplyRun 中显式清理；
-// 但 run 异常未到 terminal state 时会残留条目，TtlMap 作为兜底防止长期累积。
-const ACTIVE_KEY_TTL = 2 * 60 * 60 * 1_000
-const activeBySessionKey = new TtlMap<ActiveReplyRun>(ACTIVE_KEY_TTL)
+// 所有 run lookup map 使用统一的 RUN_CACHE_TTL，保证长时 run 在 active 期间都能被 abort/finalize 查到；
+// TTL 仅作为异常未 terminal 的兜底，正常 archive 仍显式清理。
+const activeBySessionKey = new TtlMap<ActiveReplyRun>(RUN_CACHE_TTL)
 const runsByRunId = new TtlMap<ActiveReplyRun>(RUN_CACHE_TTL)
 const runsBySessionId = new TtlMap<ActiveReplyRun>(RUN_CACHE_TTL)
 
@@ -130,6 +132,7 @@ export function requestAbortForRun(params: {
   }
 
   try {
+    run.previousStateBeforeAbort = run.state
     run.abortRequestedAt = new Date().toISOString()
     run.abortSource = params.source
     run.state = "aborting"
@@ -155,7 +158,8 @@ export function resetAbortForRun(runId: string): ActiveReplyRun | undefined {
   if (run.state !== "aborting") return run
   run.abortRequestedAt = undefined
   run.abortSource = undefined
-  run.state = "running"
+  run.state = run.previousStateBeforeAbort ?? "running"
+  run.previousStateBeforeAbort = undefined
   cacheRun(run)
   return run
 }

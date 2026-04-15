@@ -142,7 +142,8 @@ AI 工具调用后停止时，通过 session.idle 事件按需催促继续，替
 - 插件 MUST 尽量保持透传，只负责渠道承载、展示控制和交互承载，不主动塑形 agent 的内容性输入输出
 - runtime prompt MUST NOT 写入”何时发卡””如何组织标题/摘要/结论””按钮推荐文案””发送前自检”等输出策略指令
 - 详细 schema、示例和维护说明 SHOULD 放入 `SKILL.md` 或其 `references/`，而不是扩张 `prompt.md`
-- `prompt.md` 不得写入否定式控制约束（如”按钮不是 abort”）；改用正向陈述描述行为事实。控制层约束（schema 校验、回调 fallback）不应迁移到 prompt 层。
+- `prompt.md` 不得写入否定式控制约束（如”按钮不是 abort”）；改用正向陈述描述行为事实。
+- 控制层约束（schema 校验、回调 fallback 等）必须留在实现层，不得迁移到 prompt 层承担。
 
 ## 治理规则
 
