@@ -214,17 +214,8 @@ function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal
   const activeSignals = signals.filter((item): item is AbortSignal => !!item)
   if (activeSignals.length === 0) return undefined
   if (activeSignals.length === 1) return activeSignals[0]
-
-  const controller = new AbortController()
-  const onAbort = () => controller.abort()
-  for (const activeSignal of activeSignals) {
-    if (activeSignal.aborted) {
-      controller.abort()
-      break
-    }
-    activeSignal.addEventListener("abort", onAbort, { once: true })
-  }
-  return controller.signal
+  // Node 20.3.0+ 支持 AbortSignal.any()，内部会自动清理 listener 避免泄漏。
+  return AbortSignal.any(activeSignals)
 }
 
 function resolveConclusionForState(state: ReplyRunState, conclusion?: string): string | undefined {

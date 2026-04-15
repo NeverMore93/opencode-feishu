@@ -332,7 +332,13 @@ export class StreamingCard {
 
   private async renderDetails(): Promise<void> {
     if (!this.cardId) return
-    const markdown = buildDetailsMarkdown(this.detailPhases.values()) ?? ""
+    // 终态后把 running phase 映射为 completed，避免加载图标（🔄）残留在已收束的卡片上。
+    const phases: Iterable<DetailPhaseSnapshot> = this.terminalState
+      ? Array.from(this.detailPhases.values()).map((p) =>
+          p.status === "running" ? { ...p, status: "completed" as const } : p,
+        )
+      : this.detailPhases.values()
+    const markdown = buildDetailsMarkdown(phases) ?? ""
     if (!markdown) {
       if (!this.detailsElementPresent) return
       this.detailsElementPresent = false
