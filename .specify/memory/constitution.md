@@ -1,16 +1,14 @@
 <!--
-Sync Impact Report
+同步影响报告
 ==================
-- Version change: 2.6.0 → 3.0.0 (MAJOR)
-- Modified principles:
-  - 四（配置管理）: autoPrompt → nudge 配置
-  - 十一（自动提示）→ 十一（session.idle 催促）: 定时循环 → 事件驱动 + skill 指导
-  - 十二（发布流程）: 新增"未经允许禁止 commit/push/发布"约束
-- Added sections:
-  - 十四（变更审批）: 禁止未经允许的 commit/push/发布
-- Removed sections: None
-- Templates requiring updates: None
-- Follow-up TODOs: None
+- 版本变更：3.0.0 → 3.1.0（次版本）
+- 修改的原则：
+  - 十一（session.idle 催促）：skill 指导优先 → 最小 runtime prompt + 兜底催促
+- 新增章节：
+  - 十五（Prompt 与 Skill 分层）：运行时 prompt 与正式技能文档职责拆分
+- 移除章节：无
+- 需更新模板：无
+- 后续 TODO：无
 -->
 
 # opencode-feishu 项目约定
@@ -102,7 +100,7 @@ AI 工具调用后停止时，通过 session.idle 事件按需催促继续，替
 - 次数限制：`nudge.maxIterations`（默认 3 次），用户新消息后重置
 - 间隔保护：`nudge.intervalSeconds`（默认 30 秒），防止频繁催促
 - 消息可配置：`nudge.message` 字段自定义催促内容
-- Skill 指导优先：`feishu-card-interaction.md` 的"自主工作模式"指导 AI 主动继续，催促是兜底
+- 运行时 prompt 仅声明飞书渠道事实和工具契约；主动继续执行不能依赖插件侧策略性 prompt 指导，催促仅作兜底
 
 ### 十二、发布流程
 任何代码变更 MUST 先更新 `package.json` 版本号再发布。
@@ -137,10 +135,20 @@ AI 工具调用后停止时，通过 session.idle 事件按需催促继续，替
 
 **原则**：所有不可逆的共享状态变更（commit/push/merge/publish）MUST 等待用户确认。
 
+### 十五、Prompt 与 Skill 分层
+面向飞书会话的运行时 prompt 与正式技能文档 MUST 分层维护。
+- `skills/<name>/prompt.md` 仅允许包含当前渠道事实、工具契约、渲染/回调约束和显式 non-goals
+- `skills/<name>/SKILL.md` 仅用于技能发现、维护、评审和演进，不得整份注入运行时 system prompt
+- 插件 MUST 尽量保持透传，只负责渠道承载、展示控制和交互承载，不主动塑形 agent 的内容性输入输出
+- runtime prompt MUST NOT 写入“何时发卡”“如何组织标题/摘要/结论”“按钮推荐文案”“发送前自检”等输出策略指令
+- 详细 schema、示例和维护说明 SHOULD 放入 `SKILL.md` 或其 `references/`，而不是扩张 `prompt.md`
+- `prompt.md` 不得写入否定式控制约束（如”按钮不是 abort”）；改用正向陈述描述行为事实。
+- 控制层约束（schema 校验、回调 fallback 等）必须留在实现层，不得迁移到 prompt 层承担。
+
 ## 治理规则
 
 本约定文件优先级高于其他开发实践文档。
 
 所有代码变更和文档修改必须符合本约定。
 
-**版本**: 3.0.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-03-28
+**版本**: 3.1.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-04-14

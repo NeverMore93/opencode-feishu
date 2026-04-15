@@ -1,30 +1,20 @@
-<claude-mem-context>
-# Recent Activity
+# CLAUDE.md
 
-### Mar 5, 2026
+## 目录职责
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #554 | 11:07 PM | ✅ | Created comprehensive SDD specification for Feishu model switching feature | ~468 |
-| #540 | 10:51 PM | 🔵 | Feishu Plugin Does Not Control Model Selection | ~380 |
+- 本目录存放插件的生产 TypeScript 源码。
+- 这里是运行时真实行为的唯一实现层。
 
-### Mar 9, 2026
+## 可以在这里放
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #878 | 11:44 PM | 🔵 | OpenCode plugin configuration system uses recursive environment variable placeholder resolution | ~566 |
-| #713 | 3:29 PM | 🔵 | Session Lookup by Title Prefix Pattern | ~415 |
+- 入口装配、handler、Feishu 适配器、tool、utility 等生产代码。
 
-### Mar 10, 2026
+## 不要在这里放
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #954 | 3:02 PM | 🔴 | Added TTL to forkAttempts Map and cleaned up LogFn import | ~368 |
-| #950 | 3:01 PM | 🔄 | Extracted LogFn type import to top-level import statement | ~273 |
+- 规格文档、一次性脚本、临时调试文件。
+- 通过文案或启发式去接管 agent 内容生成的逻辑。
 
-### Mar 12, 2026
+## 修改约束
 
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #1324 | 3:36 PM | 🔵 | Plugin Entry Point: Initialization, Configuration, and Gateway Orchestration | ~974 |
-</claude-mem-context>
+- 继续遵守“插件尽量透传，不影响 agent 内容性输入输出”的边界。
+- 目录职责要清晰：`handler/` 编排，`feishu/` 渠道适配，`tools/` 工具暴露，`utils/` 纯工具。

@@ -17,5 +17,6 @@ openmemory.md
 .claude
 _Organized
 /logs/
-/docs/CLAUDE.md
-/output/1.txt
+docs
+output
+.npm-cache

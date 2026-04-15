@@ -23,10 +23,14 @@ import { TtlMap } from "../utils/ttl-map.js"
 export interface PendingReplyPayload {
   placeholderId: string
   feishuClient: InstanceType<typeof Lark.Client>
+  /** 是否需要把增量文本镜像到飞书文本消息。结构化卡模式下为 false。 */
+  mirrorTextToMessage: boolean
   /** 累积下来的完整文本缓冲区。 */
   textBuffer: string
   /** 锁定的 assistant messageID，首个 SSE 事件设置，后续只接受匹配的事件 */
   expectedMessageId?: string
+  /** 当前轮是否已经观测到与本次 assistant message 关联的活动。 */
+  hasActivity: boolean
 }
 
 /** 事件处理层运行所需依赖。 */
@@ -87,9 +91,14 @@ export function clearSessionError(sessionId: string): void {
  */
 export function registerPending(
   sessionId: string,
-  payload: Omit<PendingReplyPayload, "textBuffer" | "expectedMessageId">,
+  payload: Omit<PendingReplyPayload, "textBuffer" | "expectedMessageId" | "hasActivity">,
 ): void {
-  pendingBySession.set(sessionId, { ...payload, textBuffer: "", expectedMessageId: undefined })
+  pendingBySession.set(sessionId, {
+    ...payload,
+    textBuffer: "",
+    expectedMessageId: undefined,
+    hasActivity: false,
+  })
 }
 
 export function unregisterPending(sessionId: string): void {
@@ -236,22 +245,13 @@ async function handleMessagePartUpdated(
   payload: PendingReplyPayload,
   log: LogFn,
 ): Promise<void> {
-  // messageID 过滤：首个事件锁定 messageID，后续只接受匹配的事件
-  const messageId = part.messageID as string | undefined
-  if (messageId) {
-    if (!payload.expectedMessageId) {
-      // 首个事件到来时锁定 messageID，后续只接受同一 assistant message 的更新。
-      payload.expectedMessageId = messageId
-    } else if (payload.expectedMessageId !== messageId) {
-      // 串行队列虽能大幅降低串扰，但这里仍做 messageID 守卫，确保只吃当前回复的事件。
-      return
-    }
-  } else if (payload.expectedMessageId) {
-    // 一旦已经锁定 messageID，就不再接受没有 messageID 的模糊事件。
+  if (!matchOrLatchMessageId(payload, part.messageID)) {
+    // 串行队列虽能大幅降低串扰，但这里仍做 messageID 守卫，确保只吃当前回复的事件。
     return
   }
 
   const partSessionId = part.sessionID as string
+  payload.hasActivity = true
 
   // Emit tool-state-changed for tool parts (skip text-updated — tool parts have no text content)
   if (part.type === "tool") {
@@ -274,6 +274,24 @@ async function handleMessagePartUpdated(
     return
   }
 
+  if (part.type === "reasoning") {
+    const reasoningText = (part.text ?? "").trim()
+    if (reasoningText && partSessionId) {
+      emit(partSessionId, {
+        type: "details-updated",
+        sessionId: partSessionId,
+        phase: {
+          phaseId: "reasoning",
+          label: "中间思路",
+          status: "running",
+          body: reasoningText,
+          updatedAt: new Date().toISOString(),
+        },
+      }, log)
+    }
+    return
+  }
+
   // delta 是增量文本，part.text 是全量文本
   const delta = (event.properties as { delta?: string }).delta
   if (delta) {
@@ -287,7 +305,7 @@ async function handleMessagePartUpdated(
     }
   }
 
-  if (payload.textBuffer) {
+  if (payload.mirrorTextToMessage && payload.placeholderId && payload.textBuffer) {
     // 传统占位消息路径会实时把 buffer 写回飞书消息。
     const res = await sender.updateMessage(
       payload.feishuClient,
@@ -358,22 +376,31 @@ function handleV2Event(event: Event, deps: EventDeps): void {
   const evtType = (event as { type: string }).type
   const evtProps = (event as { properties?: Record<string, unknown> }).properties ?? {}
   const evtSessionId = evtProps.sessionID as string | undefined
+  const pending = evtSessionId ? pendingBySession.get(evtSessionId) : undefined
 
-  if (evtType === "permission.asked" && evtSessionId) {
+  if (evtType === "permission.asked" && evtSessionId && pending) {
+    const request = evtProps as PermissionRequest
+    const toolMessageId = request.tool?.messageID
+    if (!matchOrLatchMessageId(pending, toolMessageId)) return
+    pending.hasActivity = true
     emit(evtSessionId, {
       type: "permission-requested",
       sessionId: evtSessionId,
-      request: evtProps as PermissionRequest,
+      request,
     }, deps.log)
     deps.log("info", "permission.asked 事件已分发", { sessionId: evtSessionId })
-  } else if (evtType === "question.asked" && evtSessionId) {
+  } else if (evtType === "question.asked" && evtSessionId && pending) {
+    const request = evtProps as QuestionRequest
+    const toolMessageId = request.tool?.messageID
+    if (!matchOrLatchMessageId(pending, toolMessageId)) return
+    pending.hasActivity = true
     emit(evtSessionId, {
       type: "question-requested",
       sessionId: evtSessionId,
-      request: evtProps as QuestionRequest,
+      request,
     }, deps.log)
     deps.log("info", "question.asked 事件已分发", { sessionId: evtSessionId })
-  } else if (evtType === "session.idle" && evtSessionId) {
+  } else if (evtType === "session.idle" && evtSessionId && pending?.hasActivity) {
     emit(evtSessionId, {
       type: "session-idle",
       sessionId: evtSessionId,
@@ -475,4 +502,19 @@ function extractPartText(part: { type?: string; text?: string; [key: string]: un
   if (part.type === "text") return part.text ?? ""
   if (part.type === "reasoning" && part.text) return `🤔 思考: ${part.text}\n\n`
   return ""
+}
+
+function matchOrLatchMessageId(payload: PendingReplyPayload, messageId: unknown): boolean {
+  const normalized = typeof messageId === "string" ? messageId.trim() : ""
+  if (!normalized) {
+    // 一旦已经锁定 assistant messageID，就不再接受无法关联的模糊事件。
+    return !payload.expectedMessageId
+  }
+
+  if (!payload.expectedMessageId) {
+    payload.expectedMessageId = normalized
+    return true
+  }
+
+  return payload.expectedMessageId === normalized
 }

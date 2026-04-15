@@ -4,7 +4,7 @@
  * 在 OpenCode 中，tool execute 回调只能拿到 sessionID，
  * 但发送飞书消息需要知道 chatId 和 chatType。
  * 本模块维护 sessionId → { chatId, chatType } 的映射关系，
- * 供 feishu_send_card tool 和 system prompt 注入使用。
+ * 供 feishu_send_card tool 和最小运行时 prompt 注入判定使用。
  *
  * 使用 TtlMap 自动清理过期条目，避免长时间运行后内存增长。
  * 条目数量受限于唯一聊天数（通常很少），TTL 仅作为额外安全保障。

@@ -7,7 +7,7 @@
  * - 权限/问答交互卡片
  * 这几个关注点松耦合地串起来。
  */
-import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
+import type { DetailPhaseSnapshot, LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 
 /**
  * 仓库内部统一的“处理后事件”类型。
@@ -17,6 +17,8 @@ import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 export type ProcessedAction =
   /** 文本内容更新；可能是 delta，也可能是整段快照。 */
   | { type: "text-updated"; sessionId: string; delta?: string; fullText?: string }
+  /** 详细步骤阶段快照更新。 */
+  | { type: "details-updated"; sessionId: string; phase: DetailPhaseSnapshot }
   /** 工具调用状态变化。 */
   | { type: "tool-state-changed"; sessionId: string; callID: string; tool: string; state: "running" | "completed" | "error" }
   /** OpenCode 发来权限请求。 */

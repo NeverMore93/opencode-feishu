@@ -8,6 +8,14 @@ import * as sender from "../feishu/sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { TtlMap } from "../utils/ttl-map.js"
+import {
+  confirmAbortForRun,
+  getRunByRunId,
+  isTerminalRunState,
+  requestAbortForRun,
+  resetAbortForRun,
+} from "./reply-run-registry.js"
+import { emit } from "./action-bus.js"
 
 /** 交互模块需要的外部依赖。 */
 export interface InteractiveDeps {
@@ -25,13 +33,23 @@ const seenIds = new TtlMap<true>(10 * 60 * 1_000)
 interface PermissionReplyActionValue {
   action: "permission_reply"
   requestId: string
+  sessionId: string
   reply: "once" | "always" | "reject"
 }
 
 interface QuestionReplyActionValue {
   action: "question_reply"
   requestId: string
+  sessionId: string
   answers: string[][]
+}
+
+interface AbortReplyActionValue {
+  action: "abort_reply"
+  runId: string
+  sessionId: string
+  source?: string
+  cardVersion?: number
 }
 
 interface SendMessageActionValue {
@@ -48,6 +66,7 @@ interface SendMessageActionValue {
 export type ParsedCardActionValue =
   | PermissionReplyActionValue
   | QuestionReplyActionValue
+  | AbortReplyActionValue
   | SendMessageActionValue
 
 /**
@@ -99,15 +118,17 @@ export function parseCardActionValue(
   switch (value.action) {
     case "permission_reply": {
       const reply = value.reply
-      if (!requestId || (reply !== "once" && reply !== "always" && reply !== "reject")) {
+      const sessionId = typeof value.sessionId === "string" ? value.sessionId : ""
+      if (!requestId || !sessionId || (reply !== "once" && reply !== "always" && reply !== "reject")) {
         return undefined
       }
-      return { action: "permission_reply", requestId, reply }
+      return { action: "permission_reply", requestId, sessionId, reply }
     }
     case "question_reply": {
       const answers = value.answers
+      const sessionId = typeof value.sessionId === "string" ? value.sessionId : ""
       if (
-        !requestId ||
+        !requestId || !sessionId ||
         !Array.isArray(answers) ||
         answers.some(
           (group) => !Array.isArray(group) || group.some((answer) => typeof answer !== "string"),
@@ -115,7 +136,19 @@ export function parseCardActionValue(
       ) {
         return undefined
       }
-      return { action: "question_reply", requestId, answers }
+      return { action: "question_reply", requestId, sessionId, answers }
+    }
+    case "abort_reply": {
+      const runId = typeof value.runId === "string" ? value.runId : ""
+      const sessionId = typeof value.sessionId === "string" ? value.sessionId : ""
+      if (!runId || !sessionId) return undefined
+      return {
+        action: "abort_reply",
+        runId,
+        sessionId,
+        source: typeof value.source === "string" ? value.source : undefined,
+        cardVersion: typeof value.cardVersion === "number" ? value.cardVersion : undefined,
+      }
     }
     case "send_message": {
       const text = typeof value.text === "string" ? value.text : ""
@@ -188,14 +221,15 @@ export function handlePermissionRequested(
   request: PermissionRequest,
   chatId: string,
   deps: InteractiveDeps,
-  chatType: "p2p" | "group" = "p2p",
+  chatType: "p2p" | "group",
+  sessionId: string,
 ): void {
   const requestId = String(request.id ?? "")
   sendRequestCard({
     requestId,
     chatId,
     deps,
-    card: buildPermissionCardDSL(request, chatId, chatType),
+    card: buildPermissionCardDSL(request, chatId, chatType, sessionId),
     missingClientMessage: "v2Client 未配置，跳过权限卡片发送",
     sendFailureMessage: "发送权限卡片失败",
   })
@@ -210,14 +244,15 @@ export function handleQuestionRequested(
   request: QuestionRequest,
   chatId: string,
   deps: InteractiveDeps,
-  chatType: "p2p" | "group" = "p2p",
+  chatType: "p2p" | "group",
+  sessionId: string,
 ): void {
   const requestId = String(request.id ?? "")
   sendRequestCard({
     requestId,
     chatId,
     deps,
-    card: buildQuestionCardDSL(request, chatId, chatType),
+    card: buildQuestionCardDSL(request, chatId, chatType, sessionId),
     missingClientMessage: "v2Client 未配置，跳过问答卡片发送",
     sendFailureMessage: "发送问答卡片失败",
   })
@@ -245,35 +280,106 @@ export interface CardActionData {
 export async function handleCardAction(
   action: CardActionData,
   deps: InteractiveDeps,
-): Promise<void> {
+): Promise<object | undefined> {
   const value = parseCardActionValue(action.actionValue, deps.log)
-  if (!value || value.action === "send_message") return
+  if (!value || value.action === "send_message") {
+    return buildCallbackResponse(action, deps.log)
+  }
+
+  if (value.action === "abort_reply") {
+    const abortResult = requestAbortForRun({
+      runId: value.runId,
+      sessionId: value.sessionId,
+      source: "card",
+    })
+    if (abortResult.outcome !== "accepted") {
+      return buildToast(
+        abortResult.outcome === "failed" ? "warning" : "info",
+        abortResult.feedback,
+      )
+    }
+
+    if (!deps.v2Client) {
+      deps.log("warn", "v2Client 未配置，无法向 OpenCode 发起 abort", {
+        runId: value.runId,
+        sessionId: value.sessionId,
+      })
+      resetAbortForRun(value.runId)
+      return buildToast("warning", "当前环境未启用中断能力")
+    }
+
+    // fire-and-forget 避免卡住飞书 3 秒回调窗口；requestAbortForRun 已把 run 置 aborting，toast 立即返回
+    void deps.v2Client.session.abort({
+      sessionID: value.sessionId,
+    }).then(() => {
+      const latestRun = getRunByRunId(value.runId)
+      if (latestRun && !isTerminalRunState(latestRun.state)) {
+        confirmAbortForRun(value.runId)
+      }
+    }).catch((err) => {
+      resetAbortForRun(value.runId)
+      deps.log("error", "abort_reply 后台 session.abort 失败", {
+        runId: value.runId,
+        sessionId: value.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+    return buildToast("success", abortResult.feedback)
+  }
+
   if (!deps.v2Client) {
     deps.log("warn", "v2Client 未配置，交互回调被忽略（按钮点击不会转发到 OpenCode）", {
       actionValue: action.actionValue,
     })
-    return
+    return buildCallbackResponse(action, deps.log)
   }
 
-  try {
-    if (value.action === "permission_reply") {
-      await deps.v2Client.permission.reply({
-        requestID: value.requestId,
-        reply: value.reply,
-      })
-    } else {
-      await deps.v2Client.question.reply({
-        requestID: value.requestId,
-        answers: value.answers,
-      })
-    }
-  } catch (err) {
+  // 仅在 v2 API 确认成功后才把 detail phase 标记为 completed；失败时改为 error 避免误导用户以为已应答。
+  const phaseId = value.action === "permission_reply" ? "permission" : "question"
+  const label = value.action === "permission_reply" ? "等待授权" : "等待答复"
+  const successBody = value.action === "permission_reply" ? "用户已回应权限请求。" : "用户已回答问题。"
+  const failureBody = value.action === "permission_reply" ? "权限回调转发失败。" : "问答回调转发失败。"
+
+  const emitPhase = (status: "completed" | "error", body: string): void => {
+    emit(value.sessionId, {
+      type: "details-updated",
+      sessionId: value.sessionId,
+      phase: {
+        phaseId,
+        label,
+        status,
+        body,
+        updatedAt: new Date().toISOString(),
+      },
+    }, deps.log)
+  }
+
+  const onReplyFailed = (err: unknown): void => {
     deps.log("error", "交互回调处理失败", {
       action: value.action,
       requestId: value.requestId,
       error: err instanceof Error ? err.message : String(err),
     })
+    emitPhase("error", failureBody)
   }
+
+  try {
+    if (value.action === "permission_reply") {
+      void deps.v2Client.permission.reply({
+        requestID: value.requestId,
+        reply: value.reply,
+      }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
+    } else {
+      void deps.v2Client.question.reply({
+        requestID: value.requestId,
+        answers: value.answers,
+      }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
+    }
+  } catch (err) {
+    onReplyFailed(err)
+  }
+
+  return buildCallbackResponse(action, deps.log)
 }
 
 /**
@@ -302,6 +408,10 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
     }
   }
 
+  if (value.action === "abort_reply") {
+    return buildToast("success", "已接收中断请求，正在停止回答")
+  }
+
   if (value.action === "send_message") {
     return {
       toast: { type: "info", content: "📨 已发送" },
@@ -311,13 +421,17 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
   return {}
 }
 
+function buildToast(type: "success" | "warning" | "info", content: string): object {
+  return { toast: { type, content } }
+}
+
 /**
  * 把权限请求翻译成统一的 card DSL。
  *
  * 这里的按钮通过 `actionPayload` 注入专用 JSON，
  * 不走普通 `send_message` 分支。
  */
-function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chatType: "p2p" | "group"): object {
+function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chatType: "p2p" | "group", sessionId: string): object {
   const permission = String(request.permission ?? "unknown")
   const patterns = Array.isArray(request.patterns) ? request.patterns.map(String) : []
   const requestId = String(request.id ?? "")
@@ -330,15 +444,15 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
   const buttons: ButtonInput[] = [
     {
       text: "✅ 允许一次", value: "", style: "primary",
-      actionPayload: { action: "permission_reply", requestId, reply: "once" },
+      actionPayload: { action: "permission_reply", requestId, sessionId, reply: "once" },
     },
     {
       text: "🔓 始终允许", value: "", style: "default",
-      actionPayload: { action: "permission_reply", requestId, reply: "always" },
+      actionPayload: { action: "permission_reply", requestId, sessionId, reply: "always" },
     },
     {
       text: "❌ 拒绝", value: "", style: "danger",
-      actionPayload: { action: "permission_reply", requestId, reply: "reject" },
+      actionPayload: { action: "permission_reply", requestId, sessionId, reply: "reject" },
     },
   ]
 
@@ -356,7 +470,7 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
  *
  * 当前每个选项都会映射成一个按钮，点击后回传 `answers: [[value]]`。
  */
-function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group"): object {
+function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group", sessionId: string): object {
   const questions = request.questions ?? []
   const requestId = String(request.id ?? "")
 
@@ -373,6 +487,7 @@ function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType
     actionPayload: {
       action: "question_reply",
       requestId,
+      sessionId,
       answers: [[String(opt.value ?? opt.label ?? "")]],
     },
   }))

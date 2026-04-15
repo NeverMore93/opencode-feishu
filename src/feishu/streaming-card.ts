@@ -1,17 +1,32 @@
 /**
- * StreamingCard：单次 AI 回复对应的一张流式卡片。
+ * StreamingCard：单次 AI 回复对应的一张结构化结果卡。
  *
- * 它负责管理卡片从创建到关闭的整个生命周期，并保证多次更新串行落盘：
- * - 文本增量更新
- * - 工具状态更新
- * - 最终收尾关闭
- * - 中断时删除消息
+ * 这张卡不再把主回复当成单一正文流，而是稳定地分成：
+ * - 主题
+ * - 紧凑状态
+ * - 当前结论
+ * - 详细步骤（默认折叠）
+ * - 底部动作区（处理中可见）
  */
-import type { CardKitClient, CardKitSchema } from "./cardkit.js"
+import type { CardKitClient } from "./cardkit.js"
 import type { LogFn } from "../types.js"
-import { cleanMarkdown, truncateMarkdown } from "./markdown.js"
 import * as sender from "./sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
+import {
+  ACTIONS_ELEMENT_ID,
+  buildActionsElement,
+  buildCompactStatus,
+  buildConclusionMarkdown,
+  buildDetailsElement,
+  buildDetailsMarkdown,
+  buildReplyCardSchema,
+  buildStatusMarkdown,
+  buildTitleMarkdown,
+  createReplyCardView,
+  type DetailPhaseSnapshot,
+  type ReplyCardAction,
+} from "./result-card-view.js"
+import type { ReplyRunState, ReplyTerminalState } from "../handler/reply-run-registry.js"
 
 /** 单个工具调用在卡片上的展示状态。 */
 interface ToolState {
@@ -19,12 +34,16 @@ interface ToolState {
   state: "running" | "completed" | "error"
 }
 
-/** 卡片底部可选附带的调试/上下文信息。 */
+/** 卡片启动时需要的元信息。 */
 export interface StreamingCardMeta {
-  sessionId?: string
+  runId: string
+  sessionId: string
+  title?: string
   directory?: string
-  /** 只展示最终确认过的实际模型；流式阶段保持为空。 */
+  /** 只展示最终确认过的实际模型；当前不默认暴露。 */
   model?: string
+  state?: ReplyRunState
+  abortAction?: ReplyCardAction
 }
 
 export class StreamingCard {
@@ -36,45 +55,49 @@ export class StreamingCard {
   private seq = 0
   /** 串行更新队列，保证多次异步更新按顺序执行。 */
   private queue: Promise<void> = Promise.resolve()
-  /** 当前完整文本缓冲。 */
-  private textBuffer = ""
-  /** callID → 工具状态。 */
-  private toolStates = new Map<string, ToolState>()
   /** 卡片是否已关闭/销毁。 */
   private closed = false
-  /** tools 元素是否已经动态插入过。 */
-  private toolsElementAdded = false
-  /** 调试面板只应在收尾时追加一次。 */
-  private debugPanelAdded = false
+  /** 当前稳定结论。 */
+  private conclusion = ""
+  /** 当前运行状态。 */
+  private runState: ReplyRunState
+  /** 终态标记。 */
+  private terminalState?: ReplyTerminalState
+  /** callID → 工具状态。 */
+  private toolStates = new Map<string, ToolState>()
+  /** phaseId → 详细步骤快照。 */
+  private detailPhases = new Map<string, DetailPhaseSnapshot>()
+  /** actions 元素是否已经存在。 */
+  private actionsElementPresent = false
+  /** details 元素是否已经存在。 */
+  private detailsElementPresent = false
+  /** 避免重复写相同内容。 */
+  private readonly rendered = {
+    title: "",
+    status: "",
+    conclusion: "",
+    details: "",
+    actionsSignature: "",
+  }
+  /** CardKit 中途更新失败后进入 degraded，后续只保留本地快照用于文本回退。 */
+  private degraded = false
+  private degradedError?: Error
 
   constructor(
     private readonly cardkit: CardKitClient,
     private readonly feishuClient: InstanceType<typeof Lark.Client>,
     private readonly chatId: string,
     private readonly log: LogFn,
-    private readonly meta?: StreamingCardMeta,
-  ) {}
+    private readonly meta: StreamingCardMeta,
+  ) {
+    this.runState = meta.state ?? "starting"
+  }
 
   /**
    * 创建卡片实体并发到飞书聊天，返回对应的消息 ID。
    */
   async start(): Promise<string> {
-    const schema: CardKitSchema = {
-      data: {
-        schema: "2.0",
-        config: { streaming_mode: true },
-        header: {
-          title: { tag: "plain_text", content: "AI 回复" },
-          template: "blue",
-        },
-        body: {
-          elements: [
-            { tag: "markdown", element_id: "content", content: "正在思考..." },
-          ],
-        },
-      },
-    }
-
+    const schema = buildReplyCardSchema(this.buildView())
     this.cardId = await this.cardkit.createCard(schema)
 
     const res = await sender.sendCardMessage(this.feishuClient, this.chatId, this.cardId, this.log)
@@ -82,83 +105,137 @@ export class StreamingCard {
       throw new Error(`发送卡片消息失败: ${res.error ?? "unknown"}`)
     }
 
+    this.actionsElementPresent = !!buildActionsElement(this.buildView().actions)
+    this.detailsElementPresent = !!buildDetailsElement(this.buildView().detailsMarkdown)
     this.messageId = res.messageId
     return this.messageId
   }
 
   /**
-   * 追加一段文本增量到 `content` 区块。
+   * 兼容旧接口：把 delta 直接追加到结论区。
+   *
+   * 结构化结果卡的推荐路径是使用 `replaceText()` 做稳定快照刷新。
    */
   async updateText(delta: string): Promise<void> {
-    if (this.closed || !this.cardId) return
-    // 先更新本地 buffer，再把真正的飞书更新操作排进串行队列。
-    this.textBuffer += delta
-    this.enqueue(() => this.doUpdateContent())
+    if (this.closed || !this.cardId || this.terminalState) return
+    this.conclusion += delta
+    if (this.degraded) return
+    this.enqueue(() => this.renderConclusion())
   }
 
   /**
-   * 用完整文本替换当前缓冲区。
-   *
-   * 用于 snapshot-style 事件，而不是 delta 流。
+   * 用完整文本替换当前结论快照。
    */
   async replaceText(fullText: string): Promise<void> {
+    if (this.closed || !this.cardId || this.terminalState) return
+    this.conclusion = fullText
+    if (this.degraded) return
+    this.enqueue(() => this.renderConclusion())
+  }
+
+  async setTitle(title: string): Promise<void> {
+    if (this.closed || !this.cardId || this.terminalState) return
+    this.meta.title = title
+    if (this.degraded) return
+    this.enqueue(() => this.renderTitle())
+  }
+
+  async setRunState(state: ReplyRunState, terminalState?: ReplyTerminalState): Promise<void> {
     if (this.closed || !this.cardId) return
-    this.textBuffer = fullText
-    this.enqueue(() => this.doUpdateContent())
+    if (this.terminalState) return
+    this.runState = state
+    if (terminalState) {
+      this.terminalState = terminalState
+    }
+    if (this.degraded) return
+    this.enqueue(() => this.renderStatusAndActions())
+  }
+
+  async setDetailPhase(phase: DetailPhaseSnapshot): Promise<void> {
+    if (this.closed || !this.cardId || this.terminalState) return
+    this.detailPhases.set(phase.phaseId, phase)
+    if (this.degraded) return
+    this.enqueue(() => this.renderDetails())
+  }
+
+  async clearDetailPhase(phaseId: string): Promise<void> {
+    if (this.closed || !this.cardId || this.terminalState) return
+    if (!this.detailPhases.delete(phaseId)) return
+    if (this.degraded) return
+    this.enqueue(() => this.renderDetails())
+  }
+
+  async setReasoningSnapshot(reasoning: string): Promise<void> {
+    if (this.closed || !this.cardId || this.terminalState) return
+    const normalized = reasoning.trim()
+    if (!normalized) {
+      await this.clearDetailPhase("reasoning")
+      return
+    }
+
+    await this.setDetailPhase({
+      phaseId: "reasoning",
+      label: "中间思路",
+      status: this.terminalState ? "completed" : "running",
+      body: normalized,
+      updatedAt: new Date().toISOString(),
+    })
   }
 
   /**
    * 更新某个工具调用在卡片中的显示状态。
    */
   async setToolStatus(callID: string, tool: string, state: "running" | "completed" | "error"): Promise<void> {
-    if (this.closed || !this.cardId) return
+    if (this.closed || !this.cardId || this.terminalState) return
     this.toolStates.set(callID, { tool, state })
-    this.enqueue(() => this.doUpdateTools())
+    if (this.degraded) return
+    this.enqueue(() => this.renderToolDetails())
   }
 
   /**
-   * 关闭流式模式，并把最终文本写入卡片。
+   * 关闭流式模式，并把最终结论写回卡片。
    */
-  async close(finalMarkdown?: string): Promise<void> {
+  async close(finalConclusion?: string): Promise<void> {
     if (this.closed) return
-    this.closed = true
-    if (!this.cardId) return
-
-    if (finalMarkdown) {
-      this.textBuffer = finalMarkdown
+    if (!this.cardId) {
+      this.closed = true
+      return
     }
 
-    // 最终文本统一做 markdown 清理与截断，避免卡片渲染异常或超限。
-    this.textBuffer = truncateMarkdown(cleanMarkdown(this.textBuffer))
+    if (finalConclusion) {
+      this.conclusion = finalConclusion
+    }
 
-    // 先等之前的更新队列跑完，再写最终内容，避免顺序错乱。
     await this.drain()
-    await this.doUpdateContent()
-    // 元信息不再抢正文位置；收尾时再附一个默认折叠的调试面板。
-    try {
-      await this.appendDebugPanel()
-    } catch (err) {
-      this.log("error", "追加 StreamingCard 调试面板失败", {
-        error: err instanceof Error ? err.message : String(err),
-      })
+    if (this.degraded) {
+      this.closed = true
+      throw this.degradedError ?? new Error("StreamingCard 已降级")
     }
-    await this.cardkit.closeStreaming(this.cardId, ++this.seq)
+
+    try {
+      await this.renderAll()
+      await this.cardkit.closeStreaming(this.cardId, ++this.seq)
+      this.closed = true
+    } catch (err) {
+      this.markDegraded(err)
+      this.closed = true
+      throw this.degradedError ?? new Error("StreamingCard 收尾失败")
+    }
   }
 
   /**
-   * 在收尾前写入本次 assistant 实际执行模型。
+   * 记录最终确认过的实际模型。
    *
-   * 这里故意不在流式阶段展示模型，避免把配置值或尚未确认的临时值暴露给用户。
+   * 当前不默认渲染到结果卡，但保留该接口，避免主链路调用需要大改。
    */
   setResolvedModel(model: string | undefined): void {
-    if (!this.meta) return
     this.meta.model = model
   }
 
   /**
    * 删除整条飞书消息。
    *
-   * 主要用于 abort 或早期失败场景，避免用户看到半成品卡片。
+   * 主要用于早期失败场景，避免用户看到半成品卡片。
    */
   async destroy(): Promise<void> {
     this.closed = true
@@ -169,123 +246,175 @@ export class StreamingCard {
 
   /**
    * 把一次异步卡片更新串到内部队列尾部。
-   *
-   * 这样即使多个 SSE 事件并发到来，也能确保 sequence 严格递增、更新顺序稳定。
    */
   private enqueue(fn: () => Promise<void>): void {
     this.queue = this.queue.then(fn).catch((err) => {
+      this.markDegraded(err)
       this.log("error", "StreamingCard queue 操作失败", {
         error: err instanceof Error ? err.message : String(err),
       })
     })
   }
 
-  /** 等待当前所有排队更新执行完毕。 */
+  private markDegraded(err: unknown): void {
+    const error = err instanceof Error ? err : new Error(String(err))
+    if (this.degraded) return
+    this.degraded = true
+    this.degradedError = error
+  }
+
   private async drain(): Promise<void> {
     await this.queue
   }
 
-  /** 把当前文本缓冲写回 content 元素。 */
-  private async doUpdateContent(): Promise<void> {
-    if (!this.cardId) return
-    await this.cardkit.updateElement(
-      this.cardId,
-      "content",
-      this.textBuffer || "正在思考...",
-      ++this.seq,
-    )
+  private async renderAll(): Promise<void> {
+    await this.renderTitle()
+    await this.renderStatusAndActions()
+    await this.renderConclusion()
+    await this.renderDetails()
   }
 
-  /**
-   * 把工具状态区块写回卡片。
-   *
-   * 首次写入时动态 append 一个 `tools` element；
-   * 之后都走 updateElement 增量更新。
-   */
-  private async doUpdateTools(): Promise<void> {
+  private async renderTitle(): Promise<void> {
     if (!this.cardId) return
-    const lines: string[] = []
-    for (const [, ts] of this.toolStates) {
-      // 用图标直接表达状态，用户不需要理解内部枚举值。
-      const icon = ts.state === "completed" ? "✅" : ts.state === "error" ? "❌" : "🔄"
-      lines.push(`${icon} ${ts.tool}`)
-    }
-    const content = lines.join("\n")
+    const content = buildTitleMarkdown(this.meta.title ?? "AI 回复")
+    if (this.rendered.title === content) return
+    this.rendered.title = content
+    await this.cardkit.updateElement(this.cardId, "reply_title", content, ++this.seq)
+  }
 
-    if (!this.toolsElementAdded) {
+  private async renderStatusAndActions(): Promise<void> {
+    if (!this.cardId) return
+
+    const status = buildStatusMarkdown(buildCompactStatus(this.runState))
+    if (this.rendered.status !== status) {
+      this.rendered.status = status
+      await this.cardkit.updateElement(this.cardId, "reply_status", status, ++this.seq)
+    }
+
+    await this.renderActions()
+  }
+
+  private async renderConclusion(): Promise<void> {
+    if (!this.cardId) return
+    const content = buildConclusionMarkdown(this.conclusion)
+    if (this.rendered.conclusion === content) return
+    this.rendered.conclusion = content
+    await this.cardkit.updateElement(this.cardId, "reply_conclusion", content, ++this.seq)
+  }
+
+  private async renderToolDetails(): Promise<void> {
+    if (!this.cardId) return
+    const toolSummary: string[] = []
+    let hasRunning = false
+    let hasError = false
+
+    for (const [, toolState] of this.toolStates) {
+      const icon = toolState.state === "completed" ? "✅" : toolState.state === "error" ? "❌" : "🔄"
+      toolSummary.push(`${icon} ${toolState.tool}`)
+      if (toolState.state === "running") hasRunning = true
+      if (toolState.state === "error") hasError = true
+    }
+
+    if (toolSummary.length === 0) {
+      await this.clearDetailPhase("tools")
+      return
+    }
+
+    await this.setDetailPhase({
+      phaseId: "tools",
+      label: "工具进度",
+      status: hasError ? "error" : hasRunning ? "running" : "completed",
+      body: "",
+      toolSummary,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+
+  private async renderDetails(): Promise<void> {
+    if (!this.cardId) return
+    // 终态后把 running phase 映射为 completed，避免加载图标（🔄）残留在已收束的卡片上。
+    const phases: Iterable<DetailPhaseSnapshot> = this.terminalState
+      ? Array.from(this.detailPhases.values()).map((p) =>
+          p.status === "running" ? { ...p, status: "completed" as const } : p,
+        )
+      : this.detailPhases.values()
+    const markdown = buildDetailsMarkdown(phases) ?? ""
+    if (!markdown) {
+      if (!this.detailsElementPresent) return
+      this.detailsElementPresent = false
+      this.rendered.details = ""
+      await this.cardkit.deleteElement(this.cardId, "reply_details", ++this.seq)
+      return
+    }
+
+    if (this.rendered.details === markdown) return
+
+    const element = buildDetailsElement(markdown)
+    if (!element) return
+
+    this.rendered.details = markdown
+    if (!this.detailsElementPresent) {
       await this.cardkit.addElement(
         this.cardId,
-        [{ tag: "markdown", element_id: "tools", content }],
+        [element],
         ++this.seq,
+        this.actionsElementPresent
+          ? { position: "insert_before", targetElementId: ACTIONS_ELEMENT_ID }
+          : undefined,
       )
-      this.toolsElementAdded = true
-    } else {
-      await this.cardkit.updateElement(
-        this.cardId,
-        "tools",
-        content,
-        ++this.seq,
-      )
+      this.detailsElementPresent = true
+      return
     }
+
+    await this.cardkit.replaceElement(this.cardId, "reply_details", element, ++this.seq)
   }
 
-  /**
-   * 在卡片底部追加一个默认折叠的调试面板。
-   *
-   * 这里刻意只在 close 时写入最终值：
-   * - 不让 session/path/model 抢占正文空间
-   * - 工具摘要只在收尾时给最终稳定值，避免流式阶段频繁跳动
-   */
-  private async appendDebugPanel(): Promise<void> {
-    if (!this.cardId || this.debugPanelAdded) return
+  private async renderActions(): Promise<void> {
+    if (!this.cardId) return
 
-    const toolCount = this.toolStates.size
-    let completedCount = 0
-    let runningCount = 0
-    let errorCount = 0
-    const toolSummaryParts: string[] = []
-    // 单次遍历同时生成计数和摘要，避免对同一份工具状态做多次扫描。
-    for (const tool of this.toolStates.values()) {
-      const icon = tool.state === "completed" ? "✅" : tool.state === "error" ? "❌" : "🔄"
-      toolSummaryParts.push(`${icon} ${tool.tool}`)
-      if (tool.state === "completed") completedCount += 1
-      else if (tool.state === "running") runningCount += 1
-      else if (tool.state === "error") errorCount += 1
+    const actions = this.terminalState ? [] : this.buildView().actions
+    const signature = JSON.stringify(actions.map((action) => ({
+      kind: action.kind,
+      text: action.text,
+      style: action.style,
+      disabled: action.disabled ?? false,
+      value: action.value,
+    })))
+
+    if (actions.length === 0) {
+      if (!this.actionsElementPresent) return
+      this.actionsElementPresent = false
+      this.rendered.actionsSignature = ""
+      await this.cardkit.deleteElement(this.cardId, ACTIONS_ELEMENT_ID, ++this.seq)
+      return
     }
-    const toolSummary = toolSummaryParts.join(" · ")
 
-    // 折叠标题直接保留完整模型名；拿不到实际模型时就完全不展示。
-    const summaryParts = [this.meta?.model, `${toolCount} tools`].filter(Boolean)
-    const summaryTitle =
-      summaryParts.length > 0 ? `调试信息 · ${summaryParts.join(" · ")}` : "调试信息"
+    if (this.rendered.actionsSignature === signature) return
 
-    const detailLines: string[] = []
-    // 完整路径 / sessionId 只放在折叠详情里，默认不抢正文注意力，但需要时仍能展开查看。
-    if (this.meta?.directory) detailLines.push(`- 工作区：\`${this.meta.directory}\``)
-    if (this.meta?.model) detailLines.push(`- 模型：\`${this.meta.model}\``)
-    if (this.meta?.sessionId) detailLines.push(`- 会话：\`${this.meta.sessionId}\``)
-    detailLines.push(`- 工具数：\`${toolCount}\`（完成 ${completedCount} / 运行中 ${runningCount} / 失败 ${errorCount}）`)
-    if (toolSummary) detailLines.push(`- 工具摘要：${toolSummary}`)
-    // 总耗时目前只是本地 wall-clock 估算，不代表 SDK/模型真实执行时长，因此不对用户展示。
+    const element = buildActionsElement(actions)
+    if (!element) return
 
-    await this.cardkit.addElement(
-      this.cardId,
-      [{
-        tag: "collapsible_panel",
-        expanded: false,
-        header: {
-          title: {
-            tag: "plain_text",
-            content: summaryTitle,
-          },
-        },
-        elements: [{
-          tag: "markdown",
-          content: detailLines.join("\n"),
-        }],
-      }],
-      ++this.seq,
-    )
-    this.debugPanelAdded = true
+    this.rendered.actionsSignature = signature
+    if (!this.actionsElementPresent) {
+      await this.cardkit.addElement(this.cardId, [element], ++this.seq)
+      this.actionsElementPresent = true
+      return
+    }
+
+    await this.cardkit.replaceElement(this.cardId, ACTIONS_ELEMENT_ID, element, ++this.seq)
+  }
+
+  private buildView() {
+    const detailsMarkdown = buildDetailsMarkdown(this.detailPhases.values())
+    return createReplyCardView({
+      runId: this.meta.runId,
+      title: this.meta.title ?? "AI 回复",
+      state: this.runState,
+      conclusion: this.conclusion,
+      detailsMarkdown,
+      actions: this.meta.abortAction ? [this.meta.abortAction] : [],
+      terminalState: this.terminalState,
+      fallbackMode: "structured",
+    })
   }
 }

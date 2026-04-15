@@ -85,7 +85,7 @@ opencode
 - **CardKit 2.0 流式卡片** — AI 回复实时显示文本（markdown 渲染）和工具调用进度
 - **交互式卡片** — 权限审批和问答通过按钮完成（card.action.trigger 回调）
 - **Agent 卡片工具** — `feishu_send_card` tool，AI 自主决定何时使用卡片展示结构化内容
-- **自主工作模式** — Skill 指导 AI 持续执行、同步进度、输出完整结果（基于 Google Agent Skill Design Patterns）
+- **运行时 prompt 分层** — `prompt.md` 仅注入飞书渠道事实和工具契约，`SKILL.md` 负责维护与评审，不再用插件侧 skill 主动塑形会话
 - **多媒体消息支持** — 图片、文件、音频、富文本（含内嵌图片）、卡片表格等，自动下载转换
 - **用户名显示** — 群聊消息自动解析飞书用户名替代 open_id（24h 缓存）
 - **消息引用解析** — 解析飞书回复/引用关系，将被引用消息内容作为上下文传给 AI

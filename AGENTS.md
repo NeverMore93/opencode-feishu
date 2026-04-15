@@ -1,4 +1,4 @@
-﻿# AGENTS.md
+# AGENTS.md
 
 本文件为 Codex (Codex.ai/code) 在此代码仓库中工作时提供指导。
 
@@ -29,6 +29,12 @@
 - **当前项目不需要单测** - 专注功能实现和集成测试
 - **所有文档包括 .specify 目录下尽量用中文编写**
 - **任何变更先改版本号** - 推荐使用 `npm run release` 自动完成版本更新、commit、tag 和 push，然后通过 PR 合并到 main。
+
+### Prompt/Skill 约定
+- 插件尽量保持透传，只负责渠道事实、展示控制和交互承载，不主动塑形 agent 的内容性输入输出。
+- `skills/<name>/prompt.md` 仅作为插件运行时 prompt 源文件，内容必须限制为最小事实、工具契约、渲染/回调约束和显式 non-goals。
+- `skills/<name>/SKILL.md` 是正式技能文档，用于发现、维护、评审和演进，**不得**整份注入飞书会话的 system prompt。
+- `prompt.md` **不得**写入“何时发卡”“标题/摘要/结论如何组织”“按钮如何措辞”“发送前自检”这类输出策略指令。
 
 详细项目约定参见：`.specify/memory/constitution.md`
 
@@ -225,7 +231,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 **会话-聊天映射 (`src/feishu/session-chat-map.ts`):**
 - `registerSessionChat(sessionId, chatId, chatType)` — 注册 sessionId → chatId 映射
 - `getChatIdBySession(sessionId)` — 查询映射
-- 供 feishu_send_card tool 和 system prompt 注入使用
+- 供 feishu_send_card tool 和最小运行时 prompt 注入判定使用
 
 **辅助模块：**
 - `src/feishu/dedup.ts` - 消息去重窗口（默认 10 分钟，可通过 `dedupTtl` 配置）

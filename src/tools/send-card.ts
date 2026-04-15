@@ -38,7 +38,8 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
       "发送格式化卡片消息到当前飞书会话。支持 22 种 Card 2.0 组件：" +
       "markdown 正文、分割线、备注、交互按钮、图片、表格、折叠面板、" +
       "输入框、下拉选择、日期/时间选择器、复选框、人员选择等。" +
-      "按钮点击等同用户发送消息。卡片作为独立消息发送，不影响流式回复。",
+      "按钮点击等同用户发送消息。卡片作为独立消息发送，不影响流式回复。" +
+      "本工具只负责将 agent 已决定的内容渲染为卡片，不补全主题、摘要或结论。",
     args: {
       title: z.string().describe("卡片标题"),
       template: z
@@ -65,7 +66,7 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
                 "input（输入框）、select（单选）、multi_select（多选）、date_picker（日期）、" +
                 "time_picker（时间）、datetime_picker（日期时间）、checker（复选框）、" +
                 "overflow（更多菜单）、person_picker（人员选择）、multi_person_picker（多人选择）、" +
-                "collapse（折叠面板）、image_picker（图片选择）"
+                "collapse（折叠面板）、image_picker（图片选择）。仅使用上列类型，其他值无效。"
               ),
             content: z
               .string()
@@ -75,7 +76,7 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
               .array(
                 z.object({
                   text: z.string().describe("按钮显示文本（2-6字）"),
-                  value: z.string().describe("点击后作为用户消息发送的内容"),
+                  value: z.string().describe("按钮点击后作为用户消息发送的文本内容（纯文本，不含 JSON）。中断、权限审批、问答应答等控制语义由插件单独承载，此字段无法表达。"),
                   style: z
                     .enum(["primary", "default", "danger"])
                     .default("default")

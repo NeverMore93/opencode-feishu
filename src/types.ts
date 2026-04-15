@@ -107,6 +107,25 @@ export type LogFn = (
 ) => void
 
 /**
+ * 结构化结果卡里单个"详细步骤"阶段的状态。
+ */
+export type DetailPhaseStatus = "running" | "completed" | "error"
+
+/**
+ * 结构化结果卡里"详细步骤"区域的单个阶段快照。
+ *
+ * 跨 `handler/` 事件编排层和 `feishu/` 渲染层复用的稳定结构。
+ */
+export interface DetailPhaseSnapshot {
+  phaseId: string
+  label: string
+  status: DetailPhaseStatus
+  body: string
+  toolSummary?: string[]
+  updatedAt: string
+}
+
+/**
  * 权限请求事件里，本仓库真正用到的字段。
  *
  * 字段保持宽松是为了兼容上游事件结构的小变动。
@@ -114,10 +133,17 @@ export type LogFn = (
 export interface PermissionRequest {
   /** 请求唯一 ID，用于按钮回传。 */
   id?: string | number
+  /** 关联的 session。 */
+  sessionID?: string
   /** 权限名称。 */
   permission?: string
   /** 路径模式列表。 */
   patterns?: string[]
+  /** 若由工具调用触发，则会带上工具消息定位信息。 */
+  tool?: {
+    messageID?: string
+    callID?: string
+  }
 }
 
 /**
@@ -126,6 +152,8 @@ export interface PermissionRequest {
 export interface QuestionRequest {
   /** 请求唯一 ID。 */
   id?: string | number
+  /** 关联的 session。 */
+  sessionID?: string
   /** 问题数组；当前卡片实现只消费第一题。 */
   questions?: Array<{
     /** 问题正文。 */
@@ -135,4 +163,9 @@ export interface QuestionRequest {
     /** 用户可选选项。 */
     options?: Array<{ label?: string; value?: string }>
   }>
+  /** 若由工具调用触发，则会带上工具消息定位信息。 */
+  tool?: {
+    messageID?: string
+    callID?: string
+  }
 }
