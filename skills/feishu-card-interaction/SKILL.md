@@ -1,9 +1,9 @@
 ---
 name: feishu-card-interaction
-description: Use when maintaining the Feishu card runtime prompt, reviewing whether Feishu card guidance stays capability-neutral, or updating the Feishu card tool contract and callback semantics.
+description: 在维护飞书卡片运行时提示词、审查飞书卡片指导是否保持能力中性，或更新飞书卡片工具契约与回调语义时使用。
 ---
 
-# Feishu Card Interaction
+# 飞书卡片交互
 
 ## 概述
 

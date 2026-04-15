@@ -1,14 +1,14 @@
 <!--
-Sync Impact Report
+同步影响报告
 ==================
-- Version change: 3.0.0 → 3.1.0 (MINOR)
-- Modified principles:
-  - 十一（session.idle 催促）: skill 指导优先 → 最小 runtime prompt + 兜底催促
-- Added sections:
-  - 十五（Prompt 与 Skill 分层）: 运行时 prompt 与正式技能文档职责拆分
-- Removed sections: None
-- Templates requiring updates: None
-- Follow-up TODOs: None
+- 版本变更：3.0.0 → 3.1.0（次版本）
+- 修改的原则：
+  - 十一（session.idle 催促）：skill 指导优先 → 最小 runtime prompt + 兜底催促
+- 新增章节：
+  - 十五（Prompt 与 Skill 分层）：运行时 prompt 与正式技能文档职责拆分
+- 移除章节：无
+- 需更新模板：无
+- 后续 TODO：无
 -->
 
 # opencode-feishu 项目约定

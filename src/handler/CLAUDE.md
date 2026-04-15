@@ -12,7 +12,7 @@
 ## 不要在这里放
 
 - Feishu SDK 细节封装；那类代码进入 `src/feishu/`。
-- 通过 synthetic 输入或启发式补写去替 agent 生成主回复内容。
+- 通过 synthetic 输入或启发式补写去代替 agent 生成主回复内容。
 
 ## 修改约束
 
