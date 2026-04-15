@@ -308,25 +308,23 @@ export async function handleCardAction(
       return buildToast("warning", "当前环境未启用中断能力")
     }
 
-    try {
-      await deps.v2Client.session.abort({
-        sessionID: value.sessionId,
-      })
+    // fire-and-forget 避免卡住飞书 3 秒回调窗口；requestAbortForRun 已把 run 置 aborting，toast 立即返回
+    void deps.v2Client.session.abort({
+      sessionID: value.sessionId,
+    }).then(() => {
       const latestRun = getRunByRunId(value.runId)
-      if (latestRun && isTerminalRunState(latestRun.state)) {
-        return buildToast("info", "当前回答已结束，无需中断")
+      if (latestRun && !isTerminalRunState(latestRun.state)) {
+        confirmAbortForRun(value.runId)
       }
-      confirmAbortForRun(value.runId)
-      return buildToast("success", abortResult.feedback)
-    } catch (err) {
+    }).catch((err) => {
       resetAbortForRun(value.runId)
-      deps.log("error", "abort_reply 回调处理失败", {
+      deps.log("error", "abort_reply 后台 session.abort 失败", {
         runId: value.runId,
         sessionId: value.sessionId,
         error: err instanceof Error ? err.message : String(err),
       })
-      return buildToast("warning", "中断失败，请稍后重试")
-    }
+    })
+    return buildToast("success", abortResult.feedback)
   }
 
   if (!deps.v2Client) {

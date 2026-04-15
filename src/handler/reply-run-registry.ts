@@ -39,7 +39,10 @@ export interface AbortRequestResult {
   run?: ActiveReplyRun
 }
 
-const activeBySessionKey = new Map<string, ActiveReplyRun>()
+// activeBySessionKey 正常流程在 archiveRun / createReplyRun 中显式清理；
+// 但 run 异常未到 terminal state 时会残留条目，TtlMap 作为兜底防止长期累积。
+const ACTIVE_KEY_TTL = 2 * 60 * 60 * 1_000
+const activeBySessionKey = new TtlMap<ActiveReplyRun>(ACTIVE_KEY_TTL)
 const runsByRunId = new TtlMap<ActiveReplyRun>(RUN_CACHE_TTL)
 const runsBySessionId = new TtlMap<ActiveReplyRun>(RUN_CACHE_TTL)
 
