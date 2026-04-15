@@ -15,6 +15,7 @@ import {
   requestAbortForRun,
   resetAbortForRun,
 } from "./reply-run-registry.js"
+import { emit } from "./action-bus.js"
 
 /** 交互模块需要的外部依赖。 */
 export interface InteractiveDeps {
@@ -32,12 +33,14 @@ const seenIds = new TtlMap<true>(10 * 60 * 1_000)
 interface PermissionReplyActionValue {
   action: "permission_reply"
   requestId: string
+  sessionId: string
   reply: "once" | "always" | "reject"
 }
 
 interface QuestionReplyActionValue {
   action: "question_reply"
   requestId: string
+  sessionId: string
   answers: string[][]
 }
 
@@ -115,15 +118,17 @@ export function parseCardActionValue(
   switch (value.action) {
     case "permission_reply": {
       const reply = value.reply
-      if (!requestId || (reply !== "once" && reply !== "always" && reply !== "reject")) {
+      const sessionId = typeof value.sessionId === "string" ? value.sessionId : ""
+      if (!requestId || !sessionId || (reply !== "once" && reply !== "always" && reply !== "reject")) {
         return undefined
       }
-      return { action: "permission_reply", requestId, reply }
+      return { action: "permission_reply", requestId, sessionId, reply }
     }
     case "question_reply": {
       const answers = value.answers
+      const sessionId = typeof value.sessionId === "string" ? value.sessionId : ""
       if (
-        !requestId ||
+        !requestId || !sessionId ||
         !Array.isArray(answers) ||
         answers.some(
           (group) => !Array.isArray(group) || group.some((answer) => typeof answer !== "string"),
@@ -131,7 +136,7 @@ export function parseCardActionValue(
       ) {
         return undefined
       }
-      return { action: "question_reply", requestId, answers }
+      return { action: "question_reply", requestId, sessionId, answers }
     }
     case "abort_reply": {
       const runId = typeof value.runId === "string" ? value.runId : ""
@@ -217,13 +222,14 @@ export function handlePermissionRequested(
   chatId: string,
   deps: InteractiveDeps,
   chatType: "p2p" | "group" = "p2p",
+  sessionId: string = "",
 ): void {
   const requestId = String(request.id ?? "")
   sendRequestCard({
     requestId,
     chatId,
     deps,
-    card: buildPermissionCardDSL(request, chatId, chatType),
+    card: buildPermissionCardDSL(request, chatId, chatType, sessionId),
     missingClientMessage: "v2Client 未配置，跳过权限卡片发送",
     sendFailureMessage: "发送权限卡片失败",
   })
@@ -239,13 +245,14 @@ export function handleQuestionRequested(
   chatId: string,
   deps: InteractiveDeps,
   chatType: "p2p" | "group" = "p2p",
+  sessionId: string = "",
 ): void {
   const requestId = String(request.id ?? "")
   sendRequestCard({
     requestId,
     chatId,
     deps,
-    card: buildQuestionCardDSL(request, chatId, chatType),
+    card: buildQuestionCardDSL(request, chatId, chatType, sessionId),
     missingClientMessage: "v2Client 未配置，跳过问答卡片发送",
     sendFailureMessage: "发送问答卡片失败",
   })
@@ -361,6 +368,22 @@ export async function handleCardAction(
     })
   }
 
+  // 立即把对应 detail phase 置为 completed，避免结果卡上"等待授权/等待答复"一直显示 running。
+  const phaseId = value.action === "permission_reply" ? "permission" : "question"
+  const label = value.action === "permission_reply" ? "等待授权" : "等待答复"
+  const body = value.action === "permission_reply" ? "用户已回应权限请求。" : "用户已回答问题。"
+  emit(value.sessionId, {
+    type: "details-updated",
+    sessionId: value.sessionId,
+    phase: {
+      phaseId,
+      label,
+      status: "completed",
+      body,
+      updatedAt: new Date().toISOString(),
+    },
+  }, deps.log)
+
   return buildCallbackResponse(action, deps.log)
 }
 
@@ -413,7 +436,7 @@ function buildToast(type: "success" | "warning" | "info", content: string): obje
  * 这里的按钮通过 `actionPayload` 注入专用 JSON，
  * 不走普通 `send_message` 分支。
  */
-function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chatType: "p2p" | "group"): object {
+function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chatType: "p2p" | "group", sessionId: string): object {
   const permission = String(request.permission ?? "unknown")
   const patterns = Array.isArray(request.patterns) ? request.patterns.map(String) : []
   const requestId = String(request.id ?? "")
@@ -426,15 +449,15 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
   const buttons: ButtonInput[] = [
     {
       text: "✅ 允许一次", value: "", style: "primary",
-      actionPayload: { action: "permission_reply", requestId, reply: "once" },
+      actionPayload: { action: "permission_reply", requestId, sessionId, reply: "once" },
     },
     {
       text: "🔓 始终允许", value: "", style: "default",
-      actionPayload: { action: "permission_reply", requestId, reply: "always" },
+      actionPayload: { action: "permission_reply", requestId, sessionId, reply: "always" },
     },
     {
       text: "❌ 拒绝", value: "", style: "danger",
-      actionPayload: { action: "permission_reply", requestId, reply: "reject" },
+      actionPayload: { action: "permission_reply", requestId, sessionId, reply: "reject" },
     },
   ]
 
@@ -452,7 +475,7 @@ function buildPermissionCardDSL(request: PermissionRequest, chatId: string, chat
  *
  * 当前每个选项都会映射成一个按钮，点击后回传 `answers: [[value]]`。
  */
-function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group"): object {
+function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType: "p2p" | "group", sessionId: string): object {
   const questions = request.questions ?? []
   const requestId = String(request.id ?? "")
 
@@ -469,6 +492,7 @@ function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType
     actionPayload: {
       action: "question_reply",
       requestId,
+      sessionId,
       answers: [[String(opt.value ?? opt.label ?? "")]],
     },
   }))

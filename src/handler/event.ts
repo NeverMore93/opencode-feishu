@@ -275,7 +275,7 @@ async function handleMessagePartUpdated(
   }
 
   if (part.type === "reasoning") {
-    const reasoningText = extractPartText(part).replace(/^🤔 思考:\s*/u, "").trim()
+    const reasoningText = (part.text ?? "").trim()
     if (reasoningText && partSessionId) {
       emit(partSessionId, {
         type: "details-updated",

@@ -107,6 +107,25 @@ export type LogFn = (
 ) => void
 
 /**
+ * 结构化结果卡里单个"详细步骤"阶段的状态。
+ */
+export type DetailPhaseStatus = "running" | "completed" | "error"
+
+/**
+ * 结构化结果卡里"详细步骤"区域的单个阶段快照。
+ *
+ * 跨 `handler/` 事件编排层和 `feishu/` 渲染层复用的稳定结构。
+ */
+export interface DetailPhaseSnapshot {
+  phaseId: string
+  label: string
+  status: DetailPhaseStatus
+  body: string
+  toolSummary?: string[]
+  updatedAt: string
+}
+
+/**
  * 权限请求事件里，本仓库真正用到的字段。
  *
  * 字段保持宽松是为了兼容上游事件结构的小变动。

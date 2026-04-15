@@ -1,12 +1,17 @@
 import type { CardKitSchema } from "./cardkit.js"
 import type { PromptPart } from "./content-extractor.js"
 import type { ReplyRunState, ReplyTerminalState } from "../handler/reply-run-registry.js"
+import type { DetailPhaseSnapshot, DetailPhaseStatus } from "../types.js"
 import { cleanMarkdown, truncateMarkdown } from "./markdown.js"
+
+// Re-export 保持其他 feishu 模块（streaming-card）的 import 路径不变。
+export type { DetailPhaseSnapshot, DetailPhaseStatus }
 
 export const TITLE_ELEMENT_ID = "reply_title"
 export const STATUS_ELEMENT_ID = "reply_status"
 export const CONCLUSION_ELEMENT_ID = "reply_conclusion"
 export const DETAILS_ELEMENT_ID = "reply_details"
+export const DETAILS_CONTENT_ELEMENT_ID = "reply_details_content"
 export const ACTIONS_ELEMENT_ID = "reply_actions"
 
 const DEFAULT_TITLE = "AI 回复"
@@ -14,17 +19,6 @@ const DEFAULT_CONCLUSION = "正在整理结果..."
 const MAX_TITLE_LENGTH = 72
 
 type HeaderTemplate = "blue" | "green" | "orange" | "red" | "purple" | "grey"
-
-export type DetailPhaseStatus = "running" | "completed" | "error"
-
-export interface DetailPhaseSnapshot {
-  phaseId: string
-  label: string
-  status: DetailPhaseStatus
-  body: string
-  toolSummary?: string[]
-  updatedAt: string
-}
 
 export interface AbortActionValue {
   action: "abort_reply"
@@ -262,7 +256,7 @@ export function buildDetailsElement(detailsMarkdown: string | undefined): Record
       },
     },
     elements: [
-      buildMarkdownElement("reply_details_content", content),
+      buildMarkdownElement(DETAILS_CONTENT_ELEMENT_ID, content),
     ],
   }
 }

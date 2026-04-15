@@ -416,7 +416,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           }
           if (deps.interactiveDeps) {
             // 权限请求本身不阻塞主回复；作为独立交互卡片发给用户。
-            handlePermissionRequested(action.request, chatId, deps.interactiveDeps, chatType)
+            handlePermissionRequested(action.request, chatId, deps.interactiveDeps, chatType, action.sessionId)
           }
           break
         case "question-requested":
@@ -432,7 +432,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           }
           if (deps.interactiveDeps) {
             // 问答请求同理，交由交互层处理。
-            handleQuestionRequested(action.request, chatId, deps.interactiveDeps, chatType)
+            handleQuestionRequested(action.request, chatId, deps.interactiveDeps, chatType, action.sessionId)
           }
           break
       }
@@ -598,49 +598,45 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     // 只有拿到了结构化 sessionError，才尝试做模型错误恢复。
     if (sessionError) {
-      try {
-        timedOut = false
-        const recoveryRequestMessageId = createPromptMessageId()
-        requestMessageIds.push(recoveryRequestMessageId)
-        addRunRequestMessageId(run.runId, recoveryRequestMessageId)
-        const recovery = await tryModelRecovery({
-          sessionError, sessionId: session.id, sessionKey, client, directory,
-          requestMessageId: recoveryRequestMessageId,
-          parts,
-          timeout,
-          pollInterval,
-          stablePolls,
-          query,
-          signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
-          log,
-          poll,
-        })
+      timedOut = false
+      const recoveryRequestMessageId = createPromptMessageId()
+      requestMessageIds.push(recoveryRequestMessageId)
+      addRunRequestMessageId(run.runId, recoveryRequestMessageId)
+      const recovery = await tryModelRecovery({
+        sessionError, sessionId: session.id, sessionKey, client, directory,
+        requestMessageId: recoveryRequestMessageId,
+        parts,
+        timeout,
+        pollInterval,
+        stablePolls,
+        query,
+        signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
+        log,
+        poll,
+      })
 
-        if (recovery.recovered) {
-          const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
-          const terminalState = timedOut ? "timed_out" : "completed"
-          completeReplyRun(run.runId, terminalState)
-          if (streamingCard) {
-            await streamingCard.setRunState(terminalState, terminalState)
-          }
-          await finalizeReply({
-            streamingCard,
-            feishuClient,
-            chatId,
-            placeholderId,
-            log,
-            actualModel,
-            title: replyTitle,
-            state: terminalState,
-            conclusion: recovery.text || latestSnapshot.text || (timedOut ? "⚠️ 响应超时" : undefined),
-            detailsPhases: detailPhases.values(),
-          })
-          return
+      if (recovery.recovered) {
+        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        const terminalState = timedOut ? "timed_out" : "completed"
+        completeReplyRun(run.runId, terminalState)
+        if (streamingCard) {
+          await streamingCard.setRunState(terminalState, terminalState)
         }
-        displayError = recovery.sessionError
-      } catch (abortErr) {
-        throw abortErr
+        await finalizeReply({
+          streamingCard,
+          feishuClient,
+          chatId,
+          placeholderId,
+          log,
+          actualModel,
+          title: replyTitle,
+          state: terminalState,
+          conclusion: recovery.text || latestSnapshot.text || (timedOut ? "⚠️ 响应超时" : undefined),
+          detailsPhases: detailPhases.values(),
+        })
+        return
       }
+      displayError = recovery.sessionError
     }
 
     // 普通错误路径：把最合适的错误文案展示给用户。

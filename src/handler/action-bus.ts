@@ -7,8 +7,7 @@
  * - 权限/问答交互卡片
  * 这几个关注点松耦合地串起来。
  */
-import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
-import type { DetailPhaseSnapshot } from "../feishu/result-card-view.js"
+import type { DetailPhaseSnapshot, LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 
 /**
  * 仓库内部统一的“处理后事件”类型。
