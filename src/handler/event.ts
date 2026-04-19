@@ -218,7 +218,7 @@ export async function handleEvent(
 ): Promise<void> {
   switch (event.type as string) {
     case "message.part.delta": {
-      const props = (event as { properties: Record<string, unknown> }).properties as {
+      const props = (event as any).properties as {
         sessionID?: string
         messageID?: string
         delta?: string
@@ -235,7 +235,7 @@ export async function handleEvent(
         const res = await sender.updateMessage(
           deltaPayload.feishuClient,
           deltaPayload.placeholderId,
-          deltaPayload.textBuffer.trim(),
+          deltaPayload.textBuffer || " ",
           deps.log,
         )
         if (!res.ok) {
@@ -256,7 +256,7 @@ export async function handleEvent(
       break
     }
     case "message.part.updated": {
-      const part = (event as { properties: { part?: { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown } } }).properties.part
+      const part = (event as any).properties?.part as { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown } | undefined
       if (!part?.sessionID) break
       const payload = pendingBySession.get(part.sessionID)
       if (!payload) break
@@ -344,7 +344,7 @@ async function handleMessagePartUpdated(
     const res = await sender.updateMessage(
       payload.feishuClient,
       payload.placeholderId,
-      payload.textBuffer.trim(),
+      payload.textBuffer || " ",
       log,
     )
     if (!res.ok) {
