@@ -216,9 +216,47 @@ export async function handleEvent(
   event: Event,
   deps: EventDeps,
 ): Promise<void> {
-  switch (event.type) {
+  switch (event.type as string) {
+    case "message.part.delta": {
+      const props = (event as any).properties as {
+        sessionID?: string
+        messageID?: string
+        delta?: string
+      }
+      const { sessionID, messageID, delta } = props
+      if (!sessionID || !delta) break
+      const deltaPayload = pendingBySession.get(sessionID)
+      if (!deltaPayload) break
+      if (!matchOrLatchMessageId(deltaPayload, messageID)) return
+      deltaPayload.hasActivity = true
+      deltaPayload.textBuffer += delta
+
+      if (deltaPayload.mirrorTextToMessage && deltaPayload.placeholderId && deltaPayload.textBuffer) {
+        const res = await sender.updateMessage(
+          deltaPayload.feishuClient,
+          deltaPayload.placeholderId,
+          deltaPayload.textBuffer || " ",
+          deps.log,
+        )
+        if (!res.ok) {
+          deps.log("error", "更新飞书占位消息失败（delta）", {
+            sessionId: sessionID,
+            placeholderId: deltaPayload.placeholderId,
+            error: res.error ?? "unknown",
+          })
+        }
+      }
+
+      emit(sessionID, {
+        type: "text-updated",
+        sessionId: sessionID,
+        delta,
+        fullText: deltaPayload.textBuffer,
+      }, deps.log)
+      break
+    }
     case "message.part.updated": {
-      const part = event.properties.part
+      const part = (event as any).properties?.part as { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown } | undefined
       if (!part?.sessionID) break
       const payload = pendingBySession.get(part.sessionID)
       if (!payload) break
@@ -240,7 +278,7 @@ export async function handleEvent(
  * - 广播 action-bus 事件给其他消费者
  */
 async function handleMessagePartUpdated(
-  event: Event,
+  _event: Event,
   part: { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown },
   payload: PendingReplyPayload,
   log: LogFn,
@@ -292,17 +330,13 @@ async function handleMessagePartUpdated(
     return
   }
 
-  // delta 是增量文本，part.text 是全量文本
-  const delta = (event.properties as { delta?: string }).delta
-  if (delta) {
-    // 增量事件：直接把 delta 追加进已有 buffer。
-    payload.textBuffer += delta
-  } else {
-    const fullText = extractPartText(part)
-    if (fullText) {
-      // 快照事件：整段替换 buffer，避免重复拼接。
-      payload.textBuffer = fullText
-    }
+  // message.part.updated 只处理 text 类型的全量快照（delta 已由 message.part.delta 处理）
+  if (part.type !== "text") return
+
+  const fullText = extractPartText(part)
+  if (fullText) {
+    // 快照事件：整段替换 buffer，避免重复拼接。
+    payload.textBuffer = fullText
   }
 
   if (payload.mirrorTextToMessage && payload.placeholderId && payload.textBuffer) {
@@ -310,7 +344,7 @@ async function handleMessagePartUpdated(
     const res = await sender.updateMessage(
       payload.feishuClient,
       payload.placeholderId,
-      payload.textBuffer.trim(),
+      payload.textBuffer || " ",
       log,
     )
     if (!res.ok) {
@@ -322,12 +356,12 @@ async function handleMessagePartUpdated(
     }
   }
 
-  // Emit text-updated action to action-bus
-  if (partSessionId) {
+  // Emit text-updated action to action-bus (snapshot only, no delta)
+  if (partSessionId && payload.textBuffer) {
     emit(partSessionId, {
       type: "text-updated",
       sessionId: partSessionId,
-      delta: delta ?? undefined,
+      delta: undefined,
       fullText: payload.textBuffer,
     }, log)
   }

@@ -230,7 +230,7 @@ export function handlePermissionRequested(
     chatId,
     deps,
     card: buildPermissionCardDSL(request, chatId, chatType, sessionId),
-    missingClientMessage: "v2Client 未配置，跳过权限卡片发送",
+    missingClientMessage: "OpenCode client 未配置，跳过权限卡片发送",
     sendFailureMessage: "发送权限卡片失败",
   })
 }
@@ -253,7 +253,7 @@ export function handleQuestionRequested(
     chatId,
     deps,
     card: buildQuestionCardDSL(request, chatId, chatType, sessionId),
-    missingClientMessage: "v2Client 未配置，跳过问答卡片发送",
+    missingClientMessage: "OpenCode client 未配置，跳过问答卡片发送",
     sendFailureMessage: "发送问答卡片失败",
   })
 }
@@ -300,7 +300,7 @@ export async function handleCardAction(
     }
 
     if (!deps.v2Client) {
-      deps.log("warn", "v2Client 未配置，无法向 OpenCode 发起 abort", {
+      deps.log("warn", "OpenCode client 未配置，无法向 OpenCode 发起 abort", {
         runId: value.runId,
         sessionId: value.sessionId,
       })
@@ -328,7 +328,7 @@ export async function handleCardAction(
   }
 
   if (!deps.v2Client) {
-    deps.log("warn", "v2Client 未配置，交互回调被忽略（按钮点击不会转发到 OpenCode）", {
+    deps.log("warn", "OpenCode client 未配置，交互回调被忽略（按钮点击不会转发到 OpenCode）", {
       actionValue: action.actionValue,
     })
     return buildCallbackResponse(action, deps.log)
