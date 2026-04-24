@@ -1,6 +1,68 @@
 # CLAUDE.md
 
-本文件为 Claude Code (claude.ai/code) 在此代码仓库中工作时提供指导。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 通用编码准则
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+### 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
 ## 项目概述
 
@@ -16,14 +78,9 @@
 - 交互式卡片：权限审批和问答通过按钮完成（card.action.trigger WebSocket 回调）
 - 事件总线（action-bus）：per-session 事件订阅/发布，驱动流式卡片和交互卡片
 - Zod 配置验证：启动时结构化验证 feishu.json，拼写/类型错误立即报出
-- 通过插件 `event` 钩子接收 SSE 事件（message.part.updated、permission.asked、question.asked、session.idle）
+- 通过插件 `event` 钩子接收 SSE 事件（message.part.updated、message.part.delta、message.updated、session.error、permission.asked、question.asked、session.idle）
 
 ## 项目约定（重要）
-
-### 项目定位
-- **opencode-feishu 是 OpenCode 的插件，不是独立服务**
-- 作为 OpenCode 生态的一部分，由 OpenCode 加载和管理生命周期
-- 依赖 OpenCode Server 提供核心 AI 能力
 
 ### 开发规范
 - **当前项目不需要单测** - 专注功能实现和集成测试
@@ -34,9 +91,19 @@
 - 插件尽量保持透传，只负责渠道事实、展示控制和交互承载，不主动塑形 agent 的内容性输入输出。
 - `skills/<name>/prompt.md` 仅作为插件运行时 prompt 源文件，内容必须限制为最小事实、工具契约、渲染/回调约束和显式 non-goals。
 - `skills/<name>/SKILL.md` 是正式技能文档，用于发现、维护、评审和演进，**不得**整份注入飞书会话的 system prompt。
-- `prompt.md` **不得**写入“何时发卡”“标题/摘要/结论如何组织”“按钮如何措辞”“发送前自检”这类输出策略指令。
+- `prompt.md` **不得**写入"何时发卡""标题/摘要/结论如何组织""按钮如何措辞""发送前自检"这类输出策略指令。
+- 当前 skills：`skills/feishu-card-interaction/`（含 `prompt.md` 运行时 system prompt 与 `SKILL.md` 技能文档）。
 
 详细项目约定参见：`.specify/memory/constitution.md`
+
+## Spec 驱动开发
+
+项目使用 `.specify/` 方法学管理需求和设计：
+
+- **`specs/<编号>-<名称>/`** — 每个 feature 的规格资产（spec.md、plan.md、tasks.md、checklists/）
+- **`.specify/memory/constitution.md`** — 项目级治理规则（测试策略、文档语言、错误处理分层等）
+- **`.specify/templates/`** — spec/plan/tasks 模板
+- **工作流**: `/speckit.specify` → `/speckit.clarify` → `/speckit.plan` → `/speckit.checklist` → 实现
 
 ## 目录级 CLAUDE.md
 
@@ -48,73 +115,40 @@
 
 ### 构建和开发
 ```bash
-# 安装依赖
-npm install
-
-# 构建（使用 tsup）
-npm run build
-
-# 开发模式（监听 + 重新构建）
-npm run dev
-
-# 仅类型检查
-npm run typecheck
+npm install              # 安装依赖
+npm run build            # 构建（tsup）
+npm run dev              # 监听模式
+npm run typecheck        # 仅类型检查
+npm run typecheck && npm run build   # 提交前自检（项目无 lint/test）
 ```
 
 ### 发布
 ```bash
-# 一键版本发布（交互式选择 patch/minor/major，自动 commit + tag + push）
-npm run release
-
-# 手动发布（prepublishOnly 自动执行构建+类型检查）
-npm publish
-
-# 干运行：查看将要发布的文件（不实际发布）
-npm publish --dry-run
+npm run release          # 交互式 bumpp：选版本 → commit → tag → push
+npm publish              # 手动发布（prepublishOnly 自动跑 build+typecheck）
+npm publish --dry-run    # 预览将发布文件
 ```
 
-- `prepublishOnly` 脚本确保每次 `npm publish` 前自动运行 `build` 和 `typecheck`
-- `npm run release` 使用 bumpp 交互式选择版本，自动更新 package.json、创建 git commit 和 tag、推送到远程
-- 推送 `v*` tag 后 GitHub Actions 自动发布到 npm（需在 GitHub Secrets 中配置 `NPM_TOKEN`）
+- 推送 `v*` tag 后 GitHub Actions 自动发布到 npm（需 `NPM_TOKEN` secret）
 
 ### 本地调试
 ```bash
-# 启用调试模式（日志输出到 stderr）
-FEISHU_DEBUG=1 opencode
-
-# 配合 Lark SDK 详细日志（feishu.json 中设置 "logLevel": "debug"）
-FEISHU_DEBUG=1 opencode
-
-# 过滤错误日志
-FEISHU_DEBUG=1 opencode 2>&1 | grep '"level":"error"'
-
-# 重定向到文件
-FEISHU_DEBUG=1 opencode 2>feishu-debug.log
+FEISHU_DEBUG=1 opencode                               # 启用 stderr JSON 日志
+FEISHU_DEBUG=1 opencode 2>&1 | grep '"level":"error"' # 过滤错误日志
+FEISHU_DEBUG=1 opencode 2>feishu-debug.log            # 重定向到文件
 ```
 
 - `FEISHU_DEBUG=1`：启用 console.error 结构化 JSON 输出（不影响 stdout 管道）
-- `feishu.json` 中 `logLevel`：控制 Lark SDK 内部日志详细程度（`fatal`/`error`/`warn`/`info`/`debug`/`trace`）
-- 不设 `FEISHU_DEBUG` 时行为与之前完全一致（无 console 输出）
+- `feishu.json` 中 `logLevel`：控制 Lark SDK 内部日志（`fatal`/`error`/`warn`/`info`/`debug`/`trace`）
 
 ### 安装到 OpenCode
 
-**1. 构建插件：**
-```bash
-npm run build
-```
-
-**2. 在 `opencode.json` 中声明插件（使用项目绝对路径）：**
-```json
-{ "plugin": ["D:/path/to/opencode-feishu"] }
-```
-
-> OpenCode 插件系统会将路径转换为 `file:///` 协议直接加载 `dist/index.js`。
-> 不要使用包名（如 `"opencode-feishu"`），Windows 上 Bun 安装存在 EPERM 权限问题。
-
-**3. 创建飞书配置文件** `~/.config/opencode/plugins/feishu.json`：
-```json
-{ "appId": "cli_xxxxxxxxxxxx", "appSecret": "your_secret" }
-```
+1. `npm run build`
+2. 在 `~/.config/opencode/opencode.json` 中声明插件（**使用项目绝对路径**，不用包名——Windows 上 Bun 安装有 EPERM 问题）：
+   ```json
+   { "plugin": ["D:/path/to/opencode-feishu"] }
+   ```
+3. 创建 `~/.config/opencode/plugins/feishu.json`（完整字段见下方"配置"）
 
 ## 架构设计
 
@@ -135,118 +169,57 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
         │           └── promptAsync() → 轮询（session.idle 提前退出）→ card.close()
         ├── im.chat.member.bot.added_v1 → ingestGroupHistory()
         └── card.action.trigger → handleCardAction() → v2Client.permission/question.reply()
+                                                        (v2Client = OpenCode v2 SDK client)
     event 钩子 → handleEvent()
-        ├── message.part.updated → 更新占位消息 + emit text-updated/tool-state-changed
+        ├── message.part.updated → 全量快照：更新占位消息 + emit text-updated/tool-state-changed
+        ├── message.part.delta → 增量 delta：拼接文本增量到 pendingBySession
+        ├── message.updated → emit assistant-meta-updated（模型/费用/耗时）
         ├── permission.asked → emit permission-requested（→ 交互卡片）
         ├── question.asked → emit question-requested（→ 交互卡片）
         ├── session.idle → emit session-idle（→ 轮询提前退出）
         └── session.error → 缓存错误 + 模型不兼容时自动恢复会话
 ```
 
-### 核心模块
+### 源码结构
 
-**插件入口 (`src/index.ts`):**
-- 导出 `FeishuPlugin: Plugin`（命名导出）
-- Zod 配置验证：`FeishuConfigSchema.parse()` 替代手动 `??` 合并，启动时报出清晰错误
-- 创建 `Lark.Client`（SDK 内置 token 管理），传递给 `CardKitClient` 和 `startFeishuGateway`
-- `fetchBotOpenId()` 使用 `larkClient.request()` 自动认证（无手动 token 管理）
-- `event` 钩子：接收 OpenCode 事件，处理 6+ 事件类型并通过 action-bus 分发
-- 使用 `client.app.log()` 记录结构化日志
+```
+src/
+  index.ts              # 插件入口：配置验证、Lark Client 创建、事件钩子注册
+  session.ts            # 飞书聊天 → OpenCode session 的稳定映射 + 缓存
+  types.ts              # Zod config schema + 共享类型
+  handler/              # 会话编排层（不碰飞书 SDK 细节）
+    chat.ts             # 核心对话处理：promptAsync → 流式卡片 → 轮询 + classify 唯一调用点
+    errors.ts           # 错误分类：PluginError 5 kinds + classify + matchPluginError
+    event.ts            # SSE 事件分发 + 错误缓存 + pendingBySession
+    error-recovery.ts   # 模型错误自动恢复（消费已分类的 PluginError）
+    session-queue.ts    # per-sessionKey FIFO 串行队列
+    action-bus.ts       # per-session 事件订阅/发布
+    interactive.ts      # 权限/问答交互卡片 + 按钮回调路由
+    reply-run-registry.ts # run 生命周期状态机 + abort 支持
+  feishu/               # 飞书渠道适配层（不碰会话编排逻辑）
+    gateway.ts cardkit.ts streaming-card.ts result-card-view.ts sender.ts
+    content-extractor.ts resource.ts quote.ts user-name.ts markdown.ts
+    history.ts session-chat-map.ts dedup.ts group-filter.ts
+  tools/
+    send-card.ts        # feishu_send_card tool + 统一 DSL→CardKit JSON 翻译
+  utils/
+    ttl-map.ts          # 带 TTL 自动清理的 Map
+skills/
+  feishu-card-interaction/
+    prompt.md SKILL.md
+```
 
-**飞书网关 (`src/feishu/gateway.ts`):**
-- 接收外部创建的 `Lark.Client`（复用 token 管理和 HTTP 客户端）
-- 创建 `WSClient`（WebSocket 长连接，独立代理配置）
-- 处理 `im.message.receive_v1` 事件
-- 处理 `card.action.trigger` 卡片回调（权限/问答按钮，3 秒内返回 toast）
-- 消息去重（默认 10 分钟，可通过 `dedupTtl` 配置，通过 `dedup.ts`）
-- 群消息 @提及过滤（通过 `group-filter.ts`）
-- 处理 `im.chat.member.bot.added_v1` 用于历史摄入
+每个子目录的 `CLAUDE.md` 包含该目录下每个文件的关键行为描述。
 
-**消息队列调度器 (`src/handler/session-queue.ts`):**
-- per-sessionKey FIFO 串行处理，防止占位消息/流式卡片并发覆盖
-- 单聊和群聊统一采用顺序消费模型，避免 IM 场景里的“新消息打断旧消息”造成残留撤回或丢回复
-- 静默消息（shouldReply=false）完全绕过队列
-- 队列只负责用户消息串行化；`session.idle` 之后的催促由 `event.ts` 的 nudge 逻辑驱动
-- 暴露 `enqueueMessage()` 作为唯一入口
+### 关键跨文件契约（修改任一侧必须同步另一侧）
 
-**对话处理器 (`src/handler/chat.ts`):**
-- 使用 `client.session.promptAsync()` 异步发送消息（不阻塞）
-- 接受可选 `signal?: AbortSignal` 参数，为轮询等待等可取消路径保留统一签名
-- 会话键格式：`feishu-p2p-<userId>` 或 `feishu-group-<chatId>`
-- 会话标题格式：`Feishu-<sessionKey>-<timestamp>`
-- 静默监听模式：`promptAsync({ noReply: true })`
-- 主动回复模式：`StreamingCard.start()` → action-bus 订阅 → 轮询（session.idle 提前退出）→ `card.close()`
-- action-bus 订阅：text-updated → 卡片文本更新、tool-state-changed → 工具进度、permission/question → 交互卡片
-- StreamingCard 回退：CardKit 创建失败时自动降级为纯文本占位消息
+**`buildCardFromDSL`**（tools/send-card.ts ↔ handler/interactive.ts）——唯一真跨目录契约：
+- 同时被 agent tool 和权限/问答交互卡片复用
+- `ButtonInput.actionPayload` 有值时直接用作按钮 value（权限/问答），无值时构造 send_message action
 
-**事件处理器 (`src/handler/event.ts`):**
-- 处理 `message.part.updated`：实时更新占位消息 + emit `text-updated`/`tool-state-changed` 到 action-bus
-- 处理 `permission.asked`/`question.asked`：emit 到 action-bus（→ 交互卡片）
-- 处理 `session.idle`：emit 到 action-bus（→ 轮询提前退出）
-- 处理 `session.error`：提取错误消息、缓存到 `sessionErrors` Map、检测模型不兼容错误
-- `isModelError()`：双层匹配策略 — 层1 精确子串（已知错误码），层2 关键词组合（"model" + 否定词，覆盖未知变体）
-- 管理 `pendingBySession` 映射（sessionId → 飞书占位消息）
-- 管理 `retryAttempts` 计数器（防止无限重试循环，上限 2 次）
-- 管理 `sessionErrors` 映射（30s TTL，供 chat.ts pollForResponse 和 catch 块消费）
-
-**事件总线 (`src/handler/action-bus.ts`):**
-- per-session 事件订阅/发布：`subscribe(sessionId, cb)` 返回 unsubscribe 函数
-- `emit(sessionId, action)` fire-and-forget 分发，错误不阻塞
-- `ProcessedAction` 联合类型：5 种事件（text-updated、tool-state-changed、permission-requested、question-requested、session-idle）
-
-**交互处理器 (`src/handler/interactive.ts`):**
-- `handlePermissionRequested`/`handleQuestionRequested`：使用 `buildCardFromDSL` 构建交互卡片并发送到飞书
-- `handleCardAction`：解析按钮回调 value → 路由到 v2Client permission/question reply
-- `seenRequestIds` 防止重复发送交互卡片
-- `buildCallbackResponse`：返回 toast 即时反馈（3 秒约束）
-- 权限/问答卡片通过 `actionPayload` 字段注入按钮回调数据，复用统一 DSL 构建路径
-
-**CardKit 客户端 (`src/feishu/cardkit.ts`):**
-- `CardKitClient` 类：SDK thin wrapper，委托 `client.cardkit.v1.*` 方法
-- `createCard(schema)` → `client.cardkit.v1.card.create()`
-- `updateElement(cardId, elementId, content, sequence)` → `client.cardkit.v1.cardElement.content()`
-- `closeStreaming(cardId, sequence)` → `client.cardkit.v1.card.settings()`
-- Token 管理由 SDK Client 内置处理，无需自定义 TokenManager
-
-**流式卡片 (`src/feishu/streaming-card.ts`):**
-- `StreamingCard` 类：管理单个 AI 回复的流式卡片生命周期
-- `start()` → 创建卡片 + 发送 interactive 消息
-- `updateText(delta)` / `setToolStatus(callID, tool, state)` → 队列串行化更新
-- `close(finalMarkdown?)` → 清理 markdown + 截断 + 关闭流式模式
-- `destroy()` → 删除消息（abort 场景）
-
-**Markdown 工具 (`src/feishu/markdown.ts`):**
-- `cleanMarkdown(text)`：移除 HTML 标签、确保代码块闭合
-- `truncateMarkdown(text, limit)`：截断到 28KB 并添加提示后缀
-
-**历史摄入 (`src/feishu/history.ts`):**
-- 通过飞书 API 按 `maxHistoryMessages` 拉取最近群消息（单次请求 50 条分页）
-- 以 `noReply: true` 发送到 OpenCode（仅上下文）
-
-**消息发送器 (`src/feishu/sender.ts`):**
-- 通过飞书 API 发送、更新和删除消息
-- `sendCardMessage(client, chatId, cardId)` — 发送 CardKit 流式卡片
-- `sendInteractiveCard(client, chatId, card)` — 发送交互式卡片（权限/问答）
-
-**Agent 卡片 Tool (`src/tools/send-card.ts`):**
-- `createSendCardTool(deps)` — 注册 `feishu_send_card` tool，agent 可自主发送结构化卡片
-- `buildCardFromDSL(args, chatId, chatType)` — 统一 DSL → CardKit 2.0 JSON 翻译（同时被 agent tool 和权限/问答卡片复用）
-- `ButtonInput.actionPayload` — 内部字段，有此字段时直接用作按钮 value（权限/问答场景），无时构造 send_message action
-- `SectionInput` — 支持 markdown/divider/note/actions 四种区块类型
-
-**会话-聊天映射 (`src/feishu/session-chat-map.ts`):**
-- `registerSessionChat(sessionId, chatId, chatType)` — 注册 sessionId → chatId 映射
-- `getChatIdBySession(sessionId)` — 查询映射
-- 供 feishu_send_card tool 和最小运行时 prompt 注入判定使用
-
-**辅助模块：**
-- `src/feishu/dedup.ts` - 消息去重窗口（默认 10 分钟，可通过 `dedupTtl` 配置）
-- `src/feishu/group-filter.ts` - @提及检测
-- `src/types.ts` - 类型定义（FeishuMessageContext, ResolvedConfig, LogFn, PermissionRequest, QuestionRequest）
+handler 内部契约（`mirrorTextToMessage`、`expectedMessageId` 首条锁）详见 `src/handler/CLAUDE.md`。
 
 ## 配置
-
-### 配置文件
 
 **1. OpenCode 插件声明**（`~/.config/opencode/opencode.json`）：
 ```json
@@ -262,7 +235,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 ```
 
 必需字段：`appId`, `appSecret`
-可选字段：
+可选字段（**source of truth: `src/types.ts` 的 `FeishuConfigSchema`**）：
 - `timeout`：对话轮询总超时（毫秒）；默认不设置固定超时。仅在显式配置时，超时后返回 `⚠️ 响应超时`
 - `thinkingDelay`：默认 `2500ms`
 - `logLevel`：默认 `"info"`，控制 Lark SDK 日志级别
@@ -273,27 +246,10 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - `maxResourceSize`：默认 `500MB`，最大 `500MB`
 - `directory`：默认使用 OpenCode 当前工作目录（`ctx.directory`）；若 OpenCode 未提供则为空字符串；支持 `~` 和 `${ENV_VAR}` 展开
 - `nudge.enabled`：默认 `false`
-- `nudge.message`：默认“上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。”
+- `nudge.message`：默认"上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。"
 - `nudge.intervalSeconds`：默认 `30`
 - `nudge.maxIterations`：默认 `3`
 - `nudge` 真实行为：仅在 `session.idle` 且最后一条 assistant message 以 `tool` part 结尾时，向 OpenCode 发送 `synthetic prompt`；不会直接向飞书用户新增一条可见消息
-
-## 群聊行为
-
-### 静默监听
-- 所有群消息都转发到 OpenCode 作为上下文（`noReply: true`）
-- Bot 仅在被直接 @提及时回复
-- 静默转发：不消耗 AI token，无可见的 bot 活动
-
-### @提及检测
-- 需要 bot 的 `open_id`（通过 `/open-apis/bot/v3/info` 获取）
-- 获取失败时直接抛出错误，阻止插件启动（严格模式）
-- 检测逻辑在 `src/feishu/group-filter.ts`
-
-### 入群历史摄入
-- 由 `im.chat.member.bot.added_v1` 事件触发
-- 按 `maxHistoryMessages` 拉取最近群消息（飞书接口按 50/页分页）
-- 以 `noReply: true` 发送所有消息到 OpenCode（仅上下文）
 
 ## 消息流程变体
 
@@ -302,33 +258,13 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 | 单聊 (P2P) | 是 | 否 | 是 |
 | 群聊 + 被 @提及 | 是 | 否 | 是 |
 | 群聊 + 未被 @提及 | 是 | **是** | **否** |
-| Bot 加入群（历史） | 是 | **是** | **否** |
+| Bot 加入群（历史摄入） | 是 | **是** | **否** |
 | session.idle 催促 | 是（synthetic prompt） | 否 | 否（仅驱动 OpenCode 继续执行） |
 
-## TypeScript 配置
-
-- **目标**: ES2022
-- **模块**: ESNext + Bundler 解析
-- **构建工具**: tsup（ESM 输出，Node 20 目标）
-- **严格模式**: 启用
-- **输出**: `dist/` 目录，包含声明文件和源映射
-- **入口**: 库模式（无 shebang），导出 `FeishuPlugin`
-
-## 依赖项
-
-**运行时:**
-- `@larksuiteoapi/node-sdk`: 飞书 WebSocket 网关、REST API 客户端、内置 token 管理、CardKit 2.0 API
-- `zod`: 配置文件结构化验证
-- `https-proxy-agent`: WSClient 代理环境支持
-
-**Peer:**
-- `@opencode-ai/plugin`: OpenCode 插件接口（由 OpenCode 提供）
-
-**开发:**
-- `@opencode-ai/plugin`: 插件类型定义
-- `typescript`: 类型检查
-- `tsup`: 构建工具（基于 esbuild）
-- `@types/node`: Node.js 类型定义
+**群聊行为关键点**（实现细节见 `src/feishu/CLAUDE.md`）：
+- @提及检测依赖 bot 的 `open_id`（启动时通过 `/open-apis/bot/v3/info` 获取，失败直接阻止插件启动）
+- 历史摄入由 `im.chat.member.bot.added_v1` 入群事件触发，按 `maxHistoryMessages` 分页拉取
+- 群聊未被 @提及时仍全量转发给 OpenCode 作为上下文（`noReply: true`），不消耗 AI token
 
 ## 错误处理
 
@@ -338,61 +274,17 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - 飞书消息发送失败：尽力更新占位消息，回退到发送新消息
 - 所有错误向飞书用户发送友好消息（不静默失败）
 
-### 会话错误处理（三层架构）
+### 会话错误处理（五层架构）
 
-**L1 错误提取**（event.ts）：从 `session.error` SSE 事件提取有意义的错误消息
-- `errMsg` 提取优先级：`e.message` → `data.message` → `e.type` → `e.name` → 兜底文案
-- `extractErrorFields()`：递归提取错误对象所有 string 值（最大深度 3），自动覆盖任何嵌套结构（data.message、data.error.code 等），无需手动维护字段名或层级
-- SDK `UnknownError` 类型的 `data.message` 是 required 字段，存放原始错误名
+| 层 | 位置 | 职责 |
+|----|------|------|
+| L1 | event.ts | 从 `session.error` 提取错误消息 + raw error，缓存到 sessionErrors（30s TTL） |
+| L2 | chat.ts pollForResponse | 每次轮询检查 SSE 缓存的错误，检测到立即终止 |
+| L3 | error-recovery.ts | `classify()` 判定 `ModelUnavailable` 时用全局默认模型重试（每 sessionKey 上限 2 次） |
+| L4 | session-queue.ts | per-sessionKey FIFO 防止消息竞态 |
+| L5 | event.ts | `expectedMessageId` 首条锁防止事件串扰 |
 
-**L2 轮询期间 SSE 错误检测**（chat.ts pollForResponse）：每次 poll 周期检查 `getSessionError()`
-- `pollForResponse()` 在 sleep 后、API 调用前检查 SSE 缓存的 session error
-- 检测到错误时抛出 `SessionErrorDetected` 异常（携带 sessionError 信息），立即终止轮询
-- 使模型异步失败（prompt 成功但模型报错）在下一次轮询（默认约 1 秒）内被检测，而非依赖固定超时
-
-**L3 模型不兼容自动恢复**（chat.ts）：检测模型错误时用全局默认模型重试
-- `getGlobalDefaultModel()`：通过 `client.config.get()` 读取 `Config.model` 字段（如 `"aigw/claude-opus-4-6-v1"`），解析为 `{ providerID, modelID }`
-- 恢复策略：只用全局配置的默认模型，不在失败 provider 内搜索替代
-- 重试计数器：每 sessionKey 最多重试 2 次，防止无限循环；成功后重置计数
-- 全局默认模型未配置时，直接向用户显示错误，不重试
-
-**L4 并发控制**（session-queue.ts）：per-sessionKey FIFO 消息队列防止竞态
-- 单聊和群聊统一串行排队，保证同一逻辑会话里的消息顺序稳定
-- 静默消息绕过队列：`shouldReply=false` 直接转发，不受队列影响
-- 使用 `promptAsync()` 异步发送（不再有 prompt() HTTP 错误与 SSE 的竞态问题）
-- 错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）
-
-**L5 SSE 事件过滤**（event.ts）：messageID 防止事件串扰
-- `PendingReplyPayload.expectedMessageId`：首个 SSE 事件锁定 messageID，后续只接受匹配的事件
-- 串行队列保证首个事件属于当前请求
-
-## 日志记录
-
-- 通过 `client.app.log()` 输出到 OpenCode 日志系统（主日志通道）
-- 设置 `FEISHU_DEBUG=1` 环境变量时同时输出结构化 JSON 到 stderr（调试用）
-- 服务标识："opencode-feishu"
-- 级别：info、warn、error
-- 日志调用使用 `.catch(() => {})` 静默处理失败（防止 Unhandled Promise Rejection）
-
-## 常见开发场景
-
-### 添加新的消息事件处理器
-1. 修改 `src/feishu/gateway.ts` 注册新事件类型
-2. 在 `src/handler/` 中添加处理逻辑
-3. 在 `src/index.ts` 中连接处理器
-
-### 修改轮询行为
-- `feishu.json` 中配置 `pollInterval` 和 `stablePolls`
-- 调整以实现更快/更慢的响应检测
-
-### 调试事件流
-- 事件通过插件 `event` 钩子接收，逻辑在 `src/handler/event.ts`
-- 检查 `pendingBySession` 映射是否正确注册/注销
-
-### 测试静默监听
-- 发送群消息但不 @提及 bot
-- 检查日志中的"静默转发"条目
-- 验证无飞书回复但消息出现在 OpenCode 会话中
+各层实现细节参见 `src/handler/CLAUDE.md`。
 
 ## 重要约束
 
@@ -403,3 +295,4 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
 - **会话恢复**：依赖标题前缀匹配（修改标题的会话可能无法恢复）
 - **消息去重**：按 `dedupTtl` 窗口处理，默认 10 分钟
 - **插件生命周期**：由 OpenCode 管理，无独立进程
+- **会话中毒恢复**：检测到结构性错误（如不兼容的 file part、tool schema）时调用 `client.session.create()` 开一条**全新空白** session（**不是 fork**，**不保留历史对话**）；旧 session 在 OpenCode server 上仍存在但插件不再引用。用户需重新发送消息，上下文丢失是此策略的有意代价——fork 会复制中毒历史导致死循环。

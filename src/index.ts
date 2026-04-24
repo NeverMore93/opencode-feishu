@@ -39,6 +39,7 @@ import { initDedup } from "./feishu/dedup.js"                                   
 import { createSendCardTool } from "./tools/send-card.js"                          // Agent 可调用的 feishu_send_card tool 工厂
 import { getChatIdBySession } from "./feishu/session-chat-map.js"                  // 会话 → 聊天 ID 映射查询（判断是否飞书会话）
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"                  // OpenCode v2 REST 客户端（用于权限/问答交互回复）
+import { TtlMap } from "./utils/ttl-map.js" // 引入已有的 TtlMap：60s 缓存 config.get() 结果，消除 system.transform 每次触发都调 HTTP 的开销
 
 /** 日志服务标识，所有 client.app.log() 调用都携带此名称 */
 const SERVICE_NAME = "opencode-feishu"
@@ -90,6 +91,10 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const { client } = ctx
   // `gateway` 用于在各个 hook 闭包里判断网关是否已经成功初始化。
   let gateway: FeishuGatewayResult | null = null
+
+  // 60s 缓存 config.get() 结果（model 只在用户手动切换模型时才变化，缓存基本等价于实时）
+  const configCache = new TtlMap<{ model?: string }>(60_000)
+  const CONFIG_CACHE_KEY = "global"
 
   // 统一日志桥接：始终写入 OpenCode 日志；调试模式额外输出 stderr JSON。
   const log: LogFn = (level, message, extra) => {
@@ -204,13 +209,60 @@ export const FeishuPlugin: Plugin = async (ctx) => {
       // 注入运行时上下文（工作目录 + 当前模型）
       const runtimeLines = [`当前工作目录: ${resolvedConfig.directory || ctx.directory || "未设置"}`]
       try {
-        const cfg = await client.config.get({ query: { directory: resolvedConfig.directory || undefined } })
-        if (cfg?.data?.model) runtimeLines.push(`当前模型: ${cfg.data.model}`)
+        // 先查缓存；缓存命中则跳过 HTTP 调用（60s 内有效）
+        let cached = configCache.get(CONFIG_CACHE_KEY)
+        if (!cached) {
+          // 缓存未命中，调一次 HTTP 并写入缓存
+          const cfg = await client.config.get({ query: { directory: resolvedConfig.directory || undefined } })
+          cached = { model: cfg?.data?.model }
+          configCache.set(CONFIG_CACHE_KEY, cached)
+        }
+        if (cached.model) runtimeLines.push(`当前模型: ${cached.model}`)
       } catch (err) {
         log("warn", "获取 config 失败", { error: err instanceof Error ? err.message : String(err) })
       }
       // 作为独立 system 段落注入，避免和 skill 文本粘连。
       output.system.push(runtimeLines.join("\n"))
+    },
+
+    // chat.message：每条消息进入 agent 前记录结构化日志（sessionId/agent/model），便于飞书侧排查问题
+    // 仅在飞书会话中生效；非飞书渠道直接 return 不影响其他插件
+    "chat.message": async (input, _output) => {
+      if (!gateway) return
+      const { sessionID, agent, model } = input
+      if (!sessionID || !getChatIdBySession(sessionID)) return
+      log("info", "chat.message 到达", {
+        sessionId: sessionID,
+        agent: agent ?? "default",
+        model: model ? `${model.providerID}/${model.modelID}` : "unknown",
+      })
+    },
+
+    // permission.ask：飞书会话中自动放行 read 权限（用户已通过飞书认证，读文件风险低）
+    // write/execute 等高危权限保持默认 ask 行为，交互卡片正常弹出
+    // input 类型为 Plugin SDK Permission，不含 sessionID，通过 as any 安全提取（SDK 类型定义限制）
+    "permission.ask": async (input, output) => {
+      if (!gateway) return
+      const sessionID = (input as any).sessionID as string | undefined
+      if (!sessionID || !getChatIdBySession(sessionID)) return
+      const permission = (input as any).permission as string | undefined
+      if (permission === "read") {
+        output.status = "allow"
+        log("info", "飞书会话自动授权 read 权限", { sessionId: sessionID })
+      }
+    },
+
+    // tool.execute.after：工具执行完成后记录日志（tool 名/sessionId/callID），飞书侧可据此排查工具调用问题
+    // 仅在飞书会话中生效；其他渠道早期 return
+    "tool.execute.after": async (input, _output) => {
+      if (!gateway) return
+      const { tool, sessionID } = input
+      if (!sessionID || !getChatIdBySession(sessionID)) return
+      log("info", "工具执行完成", {
+        tool,
+        sessionId: sessionID,
+        callID: input.callID,
+      })
     },
   }
   return hooks
