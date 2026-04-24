@@ -12,5 +12,6 @@ export default defineConfig({
   treeshake: true,
   minify: false,
   external: ["@opencode-ai/plugin", "@opencode-ai/sdk", "ws"],
-  noExternal: ["@larksuiteoapi/node-sdk", "zod"],
+  // Keep runtime deps external so bundled third-party JSDoc type imports
+  // (e.g. import('./list.d.ts')) are not resolved against our dist/ folder.
 });
