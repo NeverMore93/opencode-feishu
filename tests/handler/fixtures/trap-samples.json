@@ -1,0 +1,74 @@
+[
+  {
+    "id": "trap-001-auth-with-poison-substring",
+    "description": "ProviderAuthError 的 message 恰好包含 'file part media type' 子串——不应判为 Poison",
+    "raw": { "name": "ProviderAuthError", "data": { "providerID": "anthropic", "message": "Authentication failed: the file part media type in your request is not supported by your current plan" } },
+    "expectedKind": "Unauthorized"
+  },
+  {
+    "id": "trap-002-context-with-tool-choice",
+    "description": "ContextOverflowError 的 message 恰好包含 'tool choice type'——不应判为 Poison",
+    "raw": { "name": "ContextOverflowError", "data": { "message": "Context overflow: tool choice type auto increased token usage beyond limit" } },
+    "expectedKind": "ContextOverflow"
+  },
+  {
+    "id": "trap-003-structured-output-no-poison",
+    "description": "StructuredOutputError 但 message 不含 poison pattern——不应判为 Poison",
+    "raw": { "name": "StructuredOutputError", "data": { "message": "Model did not produce structured output after 3 retries", "retries": 3 } },
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-004-structured-output-different-error",
+    "description": "StructuredOutputError 但 message 是其他内容——不应判为 Poison",
+    "raw": { "name": "StructuredOutputError", "data": { "message": "Output validation failed: missing required field 'result'", "retries": 1 } },
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-005-unknown-without-model-pattern",
+    "description": "UnknownError 但 message 不含 model 模式——应判 UnknownUpstream",
+    "raw": { "name": "UnknownError", "data": { "message": "Rate limit exceeded, please try again later" } },
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-006-string-throw",
+    "description": "纯字符串抛出物——应判 UnknownUpstream",
+    "raw": "something went wrong",
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-007-null-throw",
+    "description": "null 抛出物——应判 UnknownUpstream",
+    "raw": null,
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-008-number-throw",
+    "description": "数字抛出物——应判 UnknownUpstream",
+    "raw": 42,
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-009-plain-object",
+    "description": "普通对象无 name 字段——应判 UnknownUpstream",
+    "raw": { "code": "ERR_NETWORK", "message": "fetch failed" },
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-010-api-error-non-poison",
+    "description": "APIError 但 message 不含 poison pattern——不应判为 Poison",
+    "raw": { "name": "APIError", "data": { "message": "Request timeout after 30000ms", "statusCode": 504, "isRetryable": true } },
+    "expectedKind": "UnknownUpstream"
+  },
+  {
+    "id": "trap-011-model-not-found-in-poison-name",
+    "description": "UnknownError 同时含 model pattern 和 poison pattern——model 优先级高于 poison",
+    "raw": { "name": "UnknownError", "data": { "message": "model not found: file part media type unsupported" } },
+    "expectedKind": "ModelUnavailable"
+  },
+  {
+    "id": "trap-012-circular-ref",
+    "description": "循环引用对象——应判 UnknownUpstream 不崩溃",
+    "raw": "__CIRCULAR__",
+    "expectedKind": "UnknownUpstream"
+  }
+]

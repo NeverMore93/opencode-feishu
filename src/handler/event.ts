@@ -6,7 +6,34 @@
  * 2. 维护若干与 session 绑定的短期状态缓存
  * 3. 把事件转成 action-bus 广播给流式卡片、交互卡片等消费者
  */
-import type { Event } from "@opencode-ai/sdk"
+import type { Event as SdkEvent } from "@opencode-ai/sdk"
+
+/**
+ * 扩展的事件类型，覆盖 v2 SDK 新增的事件。
+ *
+ * v1 SDK 的 Event 联合类型不含 `message.part.delta`、`permission.asked`、
+ * `question.asked` 等 v2 事件。插件 event hook 实际会收到这些事件，
+ * 此处用本地类型补充，避免 `as any` 强制类型断言。
+ */
+type Event = SdkEvent | {
+  type: "message.part.delta"
+  properties: { sessionID: string; messageID: string; partID: string; field: string; delta: string }
+} | {
+  type: "permission.asked"
+  properties: Record<string, unknown>
+} | {
+  type: "question.asked"
+  properties: Record<string, unknown>
+} | {
+  type: "message.updated"
+  properties: { info: { role?: string; id?: string; sessionID?: string; providerID?: string; modelID?: string; cost?: number; tokens?: Record<string, unknown>; time?: { created?: number; completed?: number }; [key: string]: unknown } }
+} | {
+  type: "todo.updated"
+  properties: { sessionID: string; todos: Array<{ id: string; content: string; status: string; priority: string }> }
+} | {
+  type: string
+  properties?: Record<string, unknown>
+}
 
 import * as sender from "../feishu/sender.js"
 import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
@@ -48,7 +75,7 @@ const pendingBySession = new Map<string, PendingReplyPayload>()
 /** 缓存的会话错误信息 */
 export interface CachedSessionError {
   message: string    // 用于展示的错误消息
-  fields: string[]   // 所有提取的错误文本字段（用于模式匹配）
+  raw?: unknown      // 原始错误对象，供 classify() 使用
 }
 
 /** SSE 侧上报的会话错误，保留 30 秒供 chat.ts 轮询路径消费。 */
@@ -106,105 +133,6 @@ export function unregisterPending(sessionId: string): void {
 }
 
 /**
- * 从 error 对象提取所有可用于模式匹配的文本字段。
- *
- * 策略：显式提取 message/type/name（可能是不可枚举属性）+
- * Object.values 提取所有可枚举 string 值 + data.message 嵌套字段。
- * 原生 Error 的 message/name 是不可枚举的，Object.values 无法获取，
- * 因此必须显式提取。最终用 Set 去重。
- */
-export function extractErrorFields(error: unknown): string[] {
-  if (typeof error === "string") return [error]
-  if (error && typeof error === "object") {
-    const fields: string[] = []
-    collectStrings(error, fields, 3)
-    return [...new Set(fields)]
-  }
-  return [String(error)]
-}
-
-/**
- * 递归提取对象中所有 string 值（最大深度限制防止循环引用）。
- * 同时显式提取 message/type/name（可能不可枚举）。
- */
-function collectStrings(obj: unknown, out: string[], maxDepth: number): void {
-  if (maxDepth <= 0 || !obj || typeof obj !== "object") return
-  const e = obj as Record<string, unknown>
-  // 显式提取可能不可枚举的标准 Error 属性
-  for (const key of ["message", "type", "name"]) {
-    const v = e[key]
-    if (typeof v === "string" && v.length > 0) out.push(v)
-  }
-  // 提取所有可枚举值：string 直接收集，object 递归下探
-  for (const v of Object.values(e)) {
-    if (typeof v === "string" && v.length > 0) out.push(v)
-    else if (Array.isArray(v)) { for (const item of v) collectStrings(item, out, maxDepth - 1) }
-    else if (v && typeof v === "object") collectStrings(v, out, maxDepth - 1)
-  }
-}
-
-/**
- * 检测 session 历史数据中毒（每次 LLM 调用都会重复触发的错误）。
- */
-/**
- * session 历史中毒的高危关键词。
- *
- * 这类错误通常意味着历史消息里存在当前模型无法接受的 part/schema，
- * 单纯重试不会好，必须让上层主动丢弃旧 session。
- */
-const SESSION_POISON_PATTERNS = [
-  "file part media type",
-  "tool choice type",
-]
-
-/**
- * 某些“中毒”错误只会以格式化后的校验异常出现。
- *
- * 这些模式不是稳定子串，而是会夹杂字段名、空格或格式化差异，
- * 因此单独收敛成正则常量，避免散落在判断逻辑里。
- */
-const SESSION_POISON_REGEX_PATTERNS = [
-  /localshell.*schema/,
-  /zoderror.*local.?shell/,
-]
-
-/**
- * 检测错误字段是否指向“session 历史已经中毒”。
- *
- * 一旦命中，上层会直接 `invalidateSession()` 而不是再尝试模型恢复。
- */
-export function isSessionPoisoned(fields: string[]): boolean {
-  return fields.some(f => {
-    const l = f.toLowerCase()
-    if (SESSION_POISON_PATTERNS.some(p => l.includes(p))) return true
-    return SESSION_POISON_REGEX_PATTERNS.some(pattern => pattern.test(l))
-  })
-}
-
-/**
- * 检测错误字段是否包含模型不兼容错误。
- *
- * 双层匹配策略防止再犯：
- * 1. 精确子串：覆盖已知的错误码和格式化字符串
- * 2. 关键词组合：检测 "model" + 否定/不可用语义词，覆盖未知的自然语言变体
- */
-export function isModelError(fields: string[]): boolean {
-  const exactPatterns = [
-    "model not found", "modelnotfound", "model_not_found",
-    "model not supported", "model_not_supported", "model is not supported",
-  ]
-  const negativeWords = ["not", "unsupported", "invalid", "unavailable", "unknown", "does not", "doesn't", "cannot", "不支持", "不存在", "无效"]
-  return fields.some(f => {
-    const l = f.toLowerCase()
-    // 层 1：精确子串匹配（已知模式）
-    if (exactPatterns.some(p => l.includes(p))) return true
-    // 层 2：关键词组合匹配（"model" + 否定词 = 模型不可用）
-    if (l.includes("model") && negativeWords.some(w => l.includes(w))) return true
-    return false
-  })
-}
-
-/**
  * 事件主分发入口。
  *
  * 这里先按最关键的几个大类做路由：
@@ -216,7 +144,7 @@ export async function handleEvent(
   event: Event,
   deps: EventDeps,
 ): Promise<void> {
-  switch (event.type as string) {
+  switch (event.type) {
     case "message.part.delta": {
       const props = (event as any).properties as {
         sessionID?: string
@@ -266,6 +194,28 @@ export async function handleEvent(
     case "session.error":
       handleSessionErrorEvent(event, deps)
       break
+    // message.updated：v2 SDK 新增事件，携带完整 AssistantMessage 元数据（model/cost/tokens/time）
+    // 仅处理 role=assistant 的情况；同一 assistant message 可能触发多次（部分完成→完全完成），消费者需具备幂等性
+    case "message.updated": {
+      const info = (event.properties as any)?.info as { role?: string; sessionID?: string; providerID?: string; modelID?: string; cost?: number; tokens?: Record<string, unknown>; time?: { created?: number; completed?: number } } | undefined
+      if (info?.role === "assistant" && info.sessionID) {
+        const payload = pendingBySession.get(info.sessionID)
+        if (payload) {
+          payload.hasActivity = true
+          // 通过 action-bus 广播 assistant-meta-updated；消费者（streaming-card）据此展示模型/费用/耗时
+          emit(info.sessionID, {
+            type: "assistant-meta-updated",
+            sessionId: info.sessionID,
+            providerID: info.providerID,
+            modelID: info.modelID,
+            cost: info.cost,
+            tokens: info.tokens,
+            time: info.time,
+          }, deps.log)
+        }
+      }
+      break
+    }
     default:
       handleV2Event(event, deps)
       break
@@ -394,11 +344,22 @@ function handleSessionErrorEvent(event: Event, deps: EventDeps): void {
     errMsg = String(error)
   }
 
-  const fields = extractErrorFields(error)
-
   deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
 
-  sessionErrors.set(sessionId, { message: errMsg, fields })
+  // Phase 0 临时采样日志：记录完整 error 形状，为主 PR 的回归 fixtures 提供真实样本。
+  // 此日志在 027 主 PR 合入后删除（T035）。
+  const e = error as Record<string, unknown> | undefined
+  deps.log("warn", "session.error.raw-shape", {
+    errorName: (e as { name?: string })?.name,
+    errorKeys: e && typeof e === "object" ? Object.keys(e) : [],
+    dataKeys: (e as { data?: Record<string, unknown> })?.data && typeof (e as { data?: Record<string, unknown> }).data === "object"
+      ? Object.keys((e as { data: Record<string, unknown> }).data)
+      : [],
+    dataMessage: ((e as { data?: { message?: string } })?.data?.message ?? "").slice(0, 500),
+    sessionId,
+  })
+
+  sessionErrors.set(sessionId, { message: errMsg, raw: error })
 
   // 不在此处做 fork 恢复或向用户发送错误——统一由 chat.ts catch 块处理
 }
