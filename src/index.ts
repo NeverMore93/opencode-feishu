@@ -202,7 +202,11 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   })
 
   // 把当前 gateway 加入活跃集合：handler 触发时遍历所有 gateway 统一关闭。
-  activeGateways.add(gateway)
+  // 加 null 守护是防御性的——当前 flow narrowing 后 gateway 已收窄为非 null，
+  // 但未来若 gateway 创建路径调整，守护可防止退化。
+  if (gateway) {
+    activeGateways.add(gateway)
+  }
 
   // 仅注册一次 SIGTERM/SIGINT 监听器（OpenCode plugin 接口无 destroy 钩子，
   // 用 process signal 兜底关闭 WS，避免飞书侧出现僵尸连接）。
