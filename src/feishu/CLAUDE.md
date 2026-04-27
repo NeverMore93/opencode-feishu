@@ -93,7 +93,7 @@
 **dedup.ts** — 消息去重
 - 使用 TtlMap 记录已处理的 messageId，默认 10 分钟窗口内自动去重
 - 防止飞书 WebSocket 在网络抖动或重连时重复投递同一事件
-- 通过 `initDedup(ttl)` 支持启动时自定义去重窗口
+- 通过 `initDedup(ttl)` 在启动时自定义去重窗口；**幂等**——已 init 即跳过，防止 multi-instance bootstrap 重置 dedup map（v1.8.1 hotfix）
 
 **group-filter.ts** — @提及检测
 - 遍历飞书消息 mentions 数组，与 bot 自身的 open_id 比较

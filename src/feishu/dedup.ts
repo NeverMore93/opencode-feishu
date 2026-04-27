@@ -16,15 +16,28 @@ import { TtlMap } from "../utils/ttl-map.js"
 let dedup = new TtlMap<true>(10 * 60 * 1_000)
 
 /**
- * 初始化（或重置）去重缓存的过期时间
+ * 标记 initDedup 是否已被调用过。
  *
- * 在插件启动时调用，允许通过配置文件自定义去重窗口。
- * 调用后会创建全新的 TtlMap 实例，旧缓存被丢弃。
+ * OpenCode server-proxy multi-instance bootstrapping 下，FeishuPlugin 工厂可能
+ * 在同一进程内被多次调用（不同 directory 各触发一次 init）。如果每次都重建
+ * dedup map，已记录的 messageId 会被丢失，飞书 ack 重投机制下同消息会被处理两次。
+ *
+ * @see specs/028-lifecycle-invariants/spec.md FR-002
+ */
+let dedupInitialized = false
+
+/**
+ * 初始化去重缓存的过期时间。
+ *
+ * **幂等**：仅第一次调用生效，后续调用直接返回。
+ * 配置变更（dedupTtl）需重启 process 生效（daemon 标准行为）。
  *
  * @param ttl 去重窗口时长（毫秒）
  */
 export function initDedup(ttl: number): void {
+  if (dedupInitialized) return
   dedup = new TtlMap<true>(ttl)
+  dedupInitialized = true
 }
 
 /**
