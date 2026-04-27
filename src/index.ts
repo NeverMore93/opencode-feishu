@@ -82,6 +82,18 @@ function loadFeishuRuntimePrompt(): string {
 const feishuRuntimePrompt = loadFeishuRuntimePrompt()
 
 /**
+ * 进程级 shutdown 状态。
+ *
+ * `latestGateway` 始终指向最近一次 `FeishuPlugin(ctx)` 调用创建的网关。
+ * `signalHandlersRegistered` 防止 SIGTERM/SIGINT 监听器在多 instance bootstrap
+ * 场景下被重复注册（OpenCode server-proxy 每个 directory 会调一次工厂）。
+ *
+ * @see specs/028-lifecycle-invariants/spec.md FR-005
+ */
+let latestGateway: FeishuGatewayResult | null = null
+let signalHandlersRegistered = false
+
+/**
  * OpenCode 插件入口导出。
  *
  * OpenCode 在加载插件时会调用这个工厂函数，
@@ -186,6 +198,30 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     },
     log,
   })
+
+  // 更新进程级 shutdown 状态：handler 始终关闭最新一次 init 创建的网关。
+  latestGateway = gateway
+
+  // 仅注册一次 SIGTERM/SIGINT 监听器（OpenCode plugin 接口无 destroy 钩子，
+  // 用 process signal 兜底关闭 WS，避免飞书侧出现僵尸连接）。
+  if (!signalHandlersRegistered) {
+    signalHandlersRegistered = true
+    let stopping = false
+    const handleShutdown = (signal: NodeJS.Signals): void => {
+      // signal handler 必须幂等：多次收到同信号或不同信号时不重复关闭。
+      if (stopping) return
+      stopping = true
+      // 进程退出阶段 client.app.log 可能已失效，直接 stderr 输出。
+      console.error(`[feishu] received ${signal}, closing WS gateway`)
+      try {
+        latestGateway?.stop()
+      } catch (err) {
+        console.error(`[feishu] gateway.stop() failed during shutdown:`, err)
+      }
+    }
+    process.on("SIGTERM", handleShutdown)
+    process.on("SIGINT", handleShutdown)
+  }
 
   log("info", "飞书插件已初始化", {
     appId: resolvedConfig.appId.slice(0, 8) + "...",
