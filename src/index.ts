@@ -84,13 +84,15 @@ const feishuRuntimePrompt = loadFeishuRuntimePrompt()
 /**
  * 进程级 shutdown 状态。
  *
- * `latestGateway` 始终指向最近一次 `FeishuPlugin(ctx)` 调用创建的网关。
- * `signalHandlersRegistered` 防止 SIGTERM/SIGINT 监听器在多 instance bootstrap
- * 场景下被重复注册（OpenCode server-proxy 每个 directory 会调一次工厂）。
+ * `activeGateways` 存储所有由 `FeishuPlugin(ctx)` 调用创建的活跃网关。multi-instance
+ * bootstrap 场景下（OpenCode server-proxy 每个 directory 会调一次工厂），每次 init 都会
+ * 把新 gateway 加入集合，shutdown 时统一遍历关闭，确保所有 WSClient 都被释放。
+ *
+ * `signalHandlersRegistered` 防止 SIGTERM/SIGINT 监听器在多 instance 场景下被重复注册。
  *
  * @see specs/028-lifecycle-invariants/spec.md FR-005
  */
-let latestGateway: FeishuGatewayResult | null = null
+const activeGateways = new Set<FeishuGatewayResult>()
 let signalHandlersRegistered = false
 
 /**
@@ -199,8 +201,8 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     log,
   })
 
-  // 更新进程级 shutdown 状态：handler 始终关闭最新一次 init 创建的网关。
-  latestGateway = gateway
+  // 把当前 gateway 加入活跃集合：handler 触发时遍历所有 gateway 统一关闭。
+  activeGateways.add(gateway)
 
   // 仅注册一次 SIGTERM/SIGINT 监听器（OpenCode plugin 接口无 destroy 钩子，
   // 用 process signal 兜底关闭 WS，避免飞书侧出现僵尸连接）。
@@ -212,12 +214,19 @@ export const FeishuPlugin: Plugin = async (ctx) => {
       if (stopping) return
       stopping = true
       // 进程退出阶段 client.app.log 可能已失效，直接 stderr 输出。
-      console.error(`[feishu] received ${signal}, closing WS gateway`)
-      try {
-        latestGateway?.stop()
-      } catch (err) {
-        console.error(`[feishu] gateway.stop() failed during shutdown:`, err)
+      console.error(`[feishu] received ${signal}, closing ${activeGateways.size} WS gateway(s)`)
+      for (const g of activeGateways) {
+        try {
+          g.stop()
+        } catch (err) {
+          console.error(`[feishu] gateway.stop() failed during shutdown:`, err)
+        }
       }
+      activeGateways.clear()
+      // 不调 process.exit：plugin 不应替 OpenCode 决定进程退出策略。
+      // OpenCode server 自己应 install signal listener 驱动 graceful shutdown；
+      // 若上游未 install listener，本 handler 仍能完成 WS 关闭，process 退出由
+      // 上游进程或 SIGKILL 兜底（透传原则——plugin 不染指主进程生命周期）。
     }
     process.on("SIGTERM", handleShutdown)
     process.on("SIGINT", handleShutdown)
