@@ -9,9 +9,10 @@ import type { LogFn } from "../types.js"
 import type { PromptPart } from "../feishu/content-extractor.js"
 import {
   getRetryAttempts, setRetryAttempts, MAX_RETRY_ATTEMPTS, clearRetryAttempts,
-  getSessionError, clearSessionError, isModelError,
+  getSessionError, clearSessionError,
   type CachedSessionError,
 } from "./event.js"
+import type { PluginError } from "./errors.js"
 
 /**
  * `pollForResponse()` 在轮询期间发现 SSE 错误时抛出的专用异常。
@@ -31,8 +32,6 @@ export interface RecoveryResult {
   readonly recovered: boolean
   /** 恢复成功时的最终文本。 */
   readonly text?: string
-  /** 恢复失败时应展示/继续处理的错误对象。 */
-  readonly sessionError?: CachedSessionError
 }
 
 /**
@@ -89,15 +88,17 @@ type PollFn = (
 /**
  * 尝试做一次模型错误恢复。
  *
+ * 调用方已通过 classify() 确认 kind === "ModelUnavailable"，
+ * 这里不再做错误识别，直接尝试切回全局默认模型重试。
+ *
  * 真正会进入重试的前提：
- * - 错误字段被识别为模型类错误
  * - 尚未超过重试上限
  * - 能读到有效的全局默认模型
  *
  * AbortError 不属于恢复失败，而是上层主动中断，因此必须继续向外抛。
  */
 export async function tryModelRecovery(params: {
-  readonly sessionError: CachedSessionError
+  readonly pluginError: PluginError & { kind: "ModelUnavailable" }
   readonly sessionId: string
   readonly sessionKey: string
   readonly client: OpencodeClient
@@ -113,27 +114,23 @@ export async function tryModelRecovery(params: {
   readonly poll: PollFn
 }): Promise<RecoveryResult> {
   const {
-    sessionError, sessionId, sessionKey, client, directory,
+    pluginError, sessionId, sessionKey, client, directory,
     requestMessageId,
     parts, timeout, pollInterval, stablePolls, query, signal,
     log, poll,
   } = params
 
-  log("info", "错误字段检查", {
+  log("info", "recovery.model.attempted", {
     sessionKey,
-    fields: sessionError.fields,
-    isModel: isModelError(sessionError.fields),
+    kind: pluginError.kind,
+    providerID: pluginError.providerID,
+    evidenceCount: pluginError.evidence.length,
   })
-
-  // 不是模型类错误时，不在这里兜底，交回上层按普通错误处理。
-  if (!isModelError(sessionError.fields)) {
-    return { recovered: false, sessionError }
-  }
 
   const attempts = getRetryAttempts(sessionKey)
   if (attempts >= MAX_RETRY_ATTEMPTS) {
     log("warn", "已达重试上限，放弃恢复", { sessionKey, attempts })
-    return { recovered: false, sessionError }
+    return { recovered: false }
   }
 
   try {
@@ -150,7 +147,7 @@ export async function tryModelRecovery(params: {
 
     if (!modelOverride) {
       log("warn", "全局默认模型未配置，放弃恢复", { sessionKey })
-      return { recovered: false, sessionError }
+      return { recovered: false }
     }
 
     // 先记一次尝试次数，防止异常路径漏记。
@@ -194,24 +191,12 @@ export async function tryModelRecovery(params: {
     }
 
     const errMsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)
-    let updatedError: CachedSessionError
-    if (recoveryErr instanceof SessionErrorDetected) {
-      // 恢复期间如果直接收到了新的结构化 SSE 错误，优先使用它。
-      updatedError = recoveryErr.sessionError
-      clearSessionError(sessionId)
-    } else {
-      // 否则再回头看看 event.ts 是否已经缓存了更准确的 session.error。
-      const sseError = getSessionError(sessionId)
-      if (sseError) {
-        updatedError = sseError
-        clearSessionError(sessionId)
-      } else {
-        updatedError = { message: errMsg, fields: [] }
-      }
-    }
+
+    // 清理可能残留的 SSE 错误缓存。
+    clearSessionError(sessionId)
 
     log("error", "模型恢复失败", { sessionId, sessionKey, error: errMsg })
 
-    return { recovered: false, sessionError: updatedError }
+    return { recovered: false }
   }
 }

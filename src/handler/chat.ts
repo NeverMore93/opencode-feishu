@@ -16,9 +16,10 @@ import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
   getSessionError, clearSessionError, clearRetryAttempts,
-  clearNudge, isSessionPoisoned,
+  clearNudge,
 } from "./event.js"
 import { SessionErrorDetected, extractSessionError, tryModelRecovery } from "./error-recovery.js"
+import { classify, matchPluginError, toLog } from "./errors.js"
 import { buildSessionKey, getOrCreateSession, invalidateSession } from "../session.js"
 import { registerSessionChat } from "../feishu/session-chat-map.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
@@ -435,6 +436,14 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
             handleQuestionRequested(action.request, chatId, deps.interactiveDeps, chatType, action.sessionId)
           }
           break
+        case "assistant-meta-updated":
+          // 仅记录日志；卡片 UI 未来消费模型/费用/耗时时再加分支。
+          log("info", "assistant meta 更新", {
+            sessionId: action.sessionId,
+            model: action.providerID && action.modelID ? `${action.providerID}/${action.modelID}` : undefined,
+            cost: action.cost,
+          })
+          break
       }
     })
   }
@@ -568,59 +577,81 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       return
     }
 
-    // 提取会话错误信息（来自 SessionErrorDetected 或 SSE 缓存）
+    // 提取 SSE 缓存的原始错误（如果有的话），用于 classify。
     const sessionError = extractSessionError(err, session.id)
-    let displayError = sessionError
+    const rawForClassify = sessionError?.raw ?? err
 
-    // Session 历史中毒检测优先于模型恢复：这类问题靠重试几乎不会好。
-    if (sessionError && isSessionPoisoned(sessionError.fields)) {
-      log("error", "检测到 session 历史数据中毒，创建新 session", {
-        sessionKey, oldSessionId: session.id, error: sessionError.message,
-      })
-      invalidateSession(sessionKey)
-      completeReplyRun(run.runId, "failed")
-      if (streamingCard) {
-        await streamingCard.setRunState("failed", "failed")
-      }
-      await finalizeReply({
-        streamingCard,
-        feishuClient,
-        chatId,
-        placeholderId,
-        log,
-        title: replyTitle,
-        state: "failed",
-        conclusion: "⚠️ 会话历史包含不兼容数据，已自动重置。请重新发送消息。",
-        detailsPhases: detailPhases.values(),
-      })
-      return
-    }
+    // classify 唯一调用点（FR-011）
+    const pluginError = classify(rawForClassify)
+    log("info", "error.classified", toLog(pluginError))
 
-    // 只有拿到了结构化 sessionError，才尝试做模型错误恢复。
-    if (sessionError) {
-      timedOut = false
-      const recoveryRequestMessageId = createPromptMessageId()
-      requestMessageIds.push(recoveryRequestMessageId)
-      addRunRequestMessageId(run.runId, recoveryRequestMessageId)
-      const recovery = await tryModelRecovery({
-        sessionError, sessionId: session.id, sessionKey, client, directory,
-        requestMessageId: recoveryRequestMessageId,
-        parts,
-        timeout,
-        pollInterval,
-        stablePolls,
-        query,
-        signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
-        log,
-        poll,
-      })
-
-      if (recovery.recovered) {
-        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
-        const terminalState = timedOut ? "timed_out" : "completed"
-        completeReplyRun(run.runId, terminalState)
+    await matchPluginError(pluginError, {
+      SessionPoisoned: async (e) => {
+        log("error", "检测到 session 历史数据中毒，创建新 session", {
+          sessionKey, oldSessionId: session.id, rule: e.rule,
+        })
+        invalidateSession(sessionKey)
+        completeReplyRun(run.runId, "failed")
         if (streamingCard) {
-          await streamingCard.setRunState(terminalState, terminalState)
+          await streamingCard.setRunState("failed", "failed")
+        }
+        await finalizeReply({
+          streamingCard,
+          feishuClient,
+          chatId,
+          placeholderId,
+          log,
+          title: replyTitle,
+          state: "failed",
+          conclusion: "⚠️ 会话历史包含不兼容数据，已自动重置。请重新发送消息。",
+          detailsPhases: detailPhases.values(),
+        })
+      },
+
+      ModelUnavailable: async (e) => {
+        timedOut = false
+        const recoveryRequestMessageId = createPromptMessageId()
+        requestMessageIds.push(recoveryRequestMessageId)
+        addRunRequestMessageId(run.runId, recoveryRequestMessageId)
+        const recovery = await tryModelRecovery({
+          pluginError: e, sessionId: session.id, sessionKey, client, directory,
+          requestMessageId: recoveryRequestMessageId,
+          parts,
+          timeout,
+          pollInterval,
+          stablePolls,
+          query,
+          signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
+          log,
+          poll,
+        })
+
+        if (recovery.recovered) {
+          const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+          const terminalState = timedOut ? "timed_out" : "completed"
+          completeReplyRun(run.runId, terminalState)
+          if (streamingCard) {
+            await streamingCard.setRunState(terminalState, terminalState)
+          }
+          await finalizeReply({
+            streamingCard,
+            feishuClient,
+            chatId,
+            placeholderId,
+            log,
+            actualModel,
+            title: replyTitle,
+            state: terminalState,
+            conclusion: recovery.text || latestSnapshot.text || (timedOut ? "⚠️ 响应超时" : undefined),
+            detailsPhases: detailPhases.values(),
+          })
+          return
+        }
+        // 恢复失败：显示原始模型错误。
+        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        completeReplyRun(run.runId, "failed")
+        if (streamingCard) {
+          await streamingCard.setRunState("failed", "failed")
         }
         await finalizeReply({
           streamingCard,
@@ -630,39 +661,76 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           log,
           actualModel,
           title: replyTitle,
-          state: terminalState,
-          conclusion: recovery.text || latestSnapshot.text || (timedOut ? "⚠️ 响应超时" : undefined),
+          state: "failed",
+          conclusion: latestSnapshot.text || ("❌ " + (sessionError?.message ?? pluginError.original)),
           detailsPhases: detailPhases.values(),
         })
-        return
-      }
-      displayError = recovery.sessionError
-    }
+      },
 
-    // 普通错误路径：把最合适的错误文案展示给用户。
-    const thrownError = err instanceof Error ? err.message : String(err)
-    const errorMessage = displayError?.message || thrownError
-    log("error", "对话处理失败", {
-      sessionId: session.id, sessionKey, chatType,
-      error: thrownError,
-      ...(displayError ? { sessionError: displayError.message } : {}),
-    })
-    const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
-    completeReplyRun(run.runId, "failed")
-    if (streamingCard) {
-      await streamingCard.setRunState("failed", "failed")
-    }
-    await finalizeReply({
-      streamingCard,
-      feishuClient,
-      chatId,
-      placeholderId,
-      log,
-      actualModel,
-      title: replyTitle,
-      state: "failed",
-      conclusion: latestSnapshot.text || ("❌ " + errorMessage),
-      detailsPhases: detailPhases.values(),
+      ContextOverflow: async (e) => {
+        log("warn", "上下文溢出", { sessionKey, providerID: e.providerID })
+        completeReplyRun(run.runId, "failed")
+        if (streamingCard) {
+          await streamingCard.setRunState("failed", "failed")
+        }
+        await finalizeReply({
+          streamingCard,
+          feishuClient,
+          chatId,
+          placeholderId,
+          log,
+          title: replyTitle,
+          state: "failed",
+          conclusion: "⚠️ 对话历史过长。请开始新对话（/new 或直接在新会话里发消息）。",
+          detailsPhases: detailPhases.values(),
+        })
+      },
+
+      Unauthorized: async (e) => {
+        log("error", "provider 认证失败", { sessionKey, providerID: e.providerID })
+        completeReplyRun(run.runId, "failed")
+        if (streamingCard) {
+          await streamingCard.setRunState("failed", "failed")
+        }
+        await finalizeReply({
+          streamingCard,
+          feishuClient,
+          chatId,
+          placeholderId,
+          log,
+          title: replyTitle,
+          state: "failed",
+          conclusion: "⚠️ 模型 provider 认证失败，请联系管理员检查 API key。",
+          detailsPhases: detailPhases.values(),
+        })
+      },
+
+      UnknownUpstream: async (e) => {
+        const thrownError = err instanceof Error ? err.message : String(err)
+        const errorMessage = sessionError?.message || thrownError
+        log("error", "对话处理失败", {
+          sessionId: session.id, sessionKey, chatType,
+          hint: e.hint,
+          error: thrownError,
+        })
+        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        completeReplyRun(run.runId, "failed")
+        if (streamingCard) {
+          await streamingCard.setRunState("failed", "failed")
+        }
+        await finalizeReply({
+          streamingCard,
+          feishuClient,
+          chatId,
+          placeholderId,
+          log,
+          actualModel,
+          title: replyTitle,
+          state: "failed",
+          conclusion: latestSnapshot.text || ("❌ " + errorMessage),
+          detailsPhases: detailPhases.values(),
+        })
+      },
     })
   } finally {
     done = true

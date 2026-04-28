@@ -17,3 +17,9 @@
 ## 修改约束
 
 - 优先保持无副作用、易测试、依赖最少。
+
+## 文件职责
+
+- `ttl-map.ts` — 带 TTL 自动过期的轻量缓存容器，采用"每个 key 一个 timer"模型，到期条目由 `setTimeout` 主动清除。
+- 泛型 `TtlMap<V>` 支持 `get`/`set`/`has`/`delete` 四个操作，`set` 可传入自定义 TTL 覆盖构造时的默认值。
+- 项目内多处复用：会话缓存（`session.ts`）、中毒会话黑名单（`error-recovery.ts`）、消息去重窗口（`dedup.ts`）等。

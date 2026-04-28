@@ -27,6 +27,20 @@ export type ProcessedAction =
   | { type: "question-requested"; sessionId: string; request: QuestionRequest }
   /** Session 进入 idle。 */
   | { type: "session-idle"; sessionId: string }
+  /**
+   * Assistant 消息元信息更新（model/cost/tokens/time）。
+   * 来源：event.ts 监听 OpenCode v2 新增的 `message.updated` 事件（携带完整 AssistantMessage 元数据）。
+   * 消费者：streaming-card 可据此在卡片中展示当前模型/费用/耗时，无需额外 HTTP 调用。
+   */
+  | {
+    type: "assistant-meta-updated"
+    sessionId: string
+    providerID?: string
+    modelID?: string
+    cost?: number
+    tokens?: Record<string, unknown>
+    time?: { created?: number; completed?: number }
+  }
 
 /** 订阅回调可以同步也可以异步。 */
 type ActionCallback = (action: ProcessedAction) => void | Promise<void>

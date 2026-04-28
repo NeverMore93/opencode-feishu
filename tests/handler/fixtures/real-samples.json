@@ -1,0 +1,122 @@
+[
+  {
+    "id": "auth-001",
+    "raw": { "name": "ProviderAuthError", "data": { "providerID": "anthropic", "message": "OAuth token has expired" } },
+    "expectedKind": "Unauthorized",
+    "expectedUserMessage": "认证失败"
+  },
+  {
+    "id": "auth-002",
+    "raw": { "name": "ProviderAuthError", "data": { "providerID": "openai", "message": "Invalid API key provided" } },
+    "expectedKind": "Unauthorized",
+    "expectedUserMessage": "认证失败"
+  },
+  {
+    "id": "auth-003",
+    "raw": { "name": "ProviderAuthError", "data": { "providerID": "google", "message": "Permission denied: API key not enabled for this model" } },
+    "expectedKind": "Unauthorized",
+    "expectedUserMessage": "认证失败"
+  },
+  {
+    "id": "context-001",
+    "raw": { "name": "ContextOverflowError", "data": { "message": "context_length_exceeded" } },
+    "expectedKind": "ContextOverflow",
+    "expectedUserMessage": "对话历史过长"
+  },
+  {
+    "id": "context-002",
+    "raw": { "name": "ContextOverflowError", "data": { "message": "Conversation history too large to compact - exceeds model context limit" } },
+    "expectedKind": "ContextOverflow",
+    "expectedUserMessage": "对话历史过长"
+  },
+  {
+    "id": "context-003",
+    "raw": { "name": "ContextOverflowError", "data": { "message": "Maximum context length exceeded", "responseBody": "{\"error\":\"context_length_exceeded\"}" } },
+    "expectedKind": "ContextOverflow",
+    "expectedUserMessage": "对话历史过长"
+  },
+  {
+    "id": "model-001",
+    "raw": { "name": "ProviderModelNotFoundError", "data": { "providerID": "anthropic", "modelID": "claude-3-opus", "message": "Model not found" } },
+    "expectedKind": "ModelUnavailable",
+    "expectedUserMessage": "模型不可用"
+  },
+  {
+    "id": "model-002",
+    "raw": { "name": "ProviderModelNotFoundError", "data": { "providerID": "openai", "modelID": "gpt-5", "suggestions": ["gpt-4o", "gpt-4-turbo"] } },
+    "expectedKind": "ModelUnavailable",
+    "expectedUserMessage": "模型不可用"
+  },
+  {
+    "id": "model-003",
+    "raw": { "name": "ProviderModelNotFoundError", "data": { "providerID": "google", "modelID": "gemini-ultra" } },
+    "expectedKind": "ModelUnavailable",
+    "expectedUserMessage": "模型不可用"
+  },
+  {
+    "id": "model-004-unknown-degraded",
+    "raw": { "name": "UnknownError", "data": { "message": "model not found: claude-3-opus does not exist" } },
+    "expectedKind": "ModelUnavailable",
+    "expectedUserMessage": "模型不可用"
+  },
+  {
+    "id": "model-005-unknown-degraded",
+    "raw": { "name": "UnknownError", "data": { "message": "The model gpt-5 is not supported by this provider" } },
+    "expectedKind": "ModelUnavailable",
+    "expectedUserMessage": "模型不可用"
+  },
+  {
+    "id": "model-006-unknown-degraded",
+    "raw": { "name": "UnknownError", "data": { "message": "Model not available in your region" } },
+    "expectedKind": "ModelUnavailable",
+    "expectedUserMessage": "模型不可用"
+  },
+  {
+    "id": "poison-001-file-part",
+    "raw": { "name": "StructuredOutputError", "data": { "message": "AI_UnsupportedFunctionalityError: 'file part media type text/x-yaml'", "retries": 3 } },
+    "expectedKind": "SessionPoisoned",
+    "expectedUserMessage": "会话历史包含不兼容数据"
+  },
+  {
+    "id": "poison-002-tool-choice",
+    "raw": { "name": "UnknownError", "data": { "message": "Unsupported tool choice type: auto is not allowed" } },
+    "expectedKind": "SessionPoisoned",
+    "expectedUserMessage": "会话历史包含不兼容数据"
+  },
+  {
+    "id": "poison-003-localshell",
+    "raw": { "name": "APIError", "data": { "message": "Validation failed: localShell input does not match schema", "statusCode": 400, "isRetryable": false } },
+    "expectedKind": "SessionPoisoned",
+    "expectedUserMessage": "会话历史包含不兼容数据"
+  },
+  {
+    "id": "poison-004-zoderror",
+    "raw": { "name": "APIError", "data": { "message": "ZodError: expected object at local_shell config", "statusCode": 422, "isRetryable": false } },
+    "expectedKind": "SessionPoisoned",
+    "expectedUserMessage": "会话历史包含不兼容数据"
+  },
+  {
+    "id": "unknown-001-generic",
+    "raw": { "name": "UnknownError", "data": { "message": "An unexpected error occurred while processing the request" } },
+    "expectedKind": "UnknownUpstream",
+    "expectedUserMessage": "未知错误"
+  },
+  {
+    "id": "unknown-002-api-non-poison",
+    "raw": { "name": "APIError", "data": { "message": "Connection reset by server", "statusCode": 502, "isRetryable": true } },
+    "expectedKind": "UnknownUpstream",
+    "expectedUserMessage": "未知错误"
+  },
+  {
+    "id": "unknown-003-output-length",
+    "raw": { "name": "MessageOutputLengthError", "data": {} },
+    "expectedKind": "UnknownUpstream",
+    "expectedUserMessage": "未知错误"
+  },
+  {
+    "id": "unknown-004-aborted",
+    "raw": { "name": "MessageAbortedError", "data": { "message": "Message generation was aborted by user" } },
+    "expectedKind": "UnknownUpstream",
+    "expectedUserMessage": "未知错误"
+  }
+]
