@@ -82,6 +82,8 @@ export class StreamingCard {
   /** CardKit 中途更新失败后进入 degraded，后续只保留本地快照用于文本回退。 */
   private degraded = false
   private degradedError?: Error
+  /** 结论区 debounce 定时器 ID（0 = 无挂起）。 */
+  private conclusionTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly cardkit: CardKitClient,
@@ -120,7 +122,7 @@ export class StreamingCard {
     if (this.closed || !this.cardId || this.terminalState) return
     this.conclusion += delta
     if (this.degraded) return
-    this.enqueue(() => this.renderConclusion())
+    this.scheduleConclusionRender()
   }
 
   /**
@@ -130,7 +132,7 @@ export class StreamingCard {
     if (this.closed || !this.cardId || this.terminalState) return
     this.conclusion = fullText
     if (this.degraded) return
-    this.enqueue(() => this.renderConclusion())
+    this.scheduleConclusionRender()
   }
 
   async setTitle(title: string): Promise<void> {
@@ -206,6 +208,8 @@ export class StreamingCard {
       this.conclusion = finalConclusion
     }
 
+    // flush 挂起的 debounce 定时器，确保最新结论进入队列
+    this.flushConclusionTimer()
     await this.drain()
     if (this.degraded) {
       this.closed = true
@@ -214,13 +218,23 @@ export class StreamingCard {
 
     try {
       await this.renderAll()
-      await this.cardkit.closeStreaming(this.cardId, ++this.seq)
-      this.closed = true
     } catch (err) {
       this.markDegraded(err)
       this.closed = true
       throw this.degradedError ?? new Error("StreamingCard 收尾失败")
     }
+
+    // renderAll 成功后内容已完整写入卡片；closeStreaming 失败只影响流式指示器，
+    // 不应删除已渲染的结构化内容。降级为日志记录，保留卡片。
+    try {
+      await this.cardkit.closeStreaming(this.cardId, ++this.seq)
+    } catch (err) {
+      this.log("error", "closeStreaming 失败（内容已完整渲染）", {
+        cardId: this.cardId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    this.closed = true
   }
 
   /**
@@ -239,8 +253,41 @@ export class StreamingCard {
    */
   async destroy(): Promise<void> {
     this.closed = true
+    if (this.conclusionTimer) {
+      clearTimeout(this.conclusionTimer)
+      this.conclusionTimer = null
+    }
     if (this.messageId) {
       await sender.deleteMessage(this.feishuClient, this.messageId, this.log)
+    }
+  }
+
+  /**
+   * Debounce 结论区渲染：200ms 内无新 delta 才真正触发。
+   *
+   * 流式场景下每秒 30-100 次 delta，直接 enqueue 每次都会发起
+   * CardKit HTTP 请求，是导致 degraded 的主要根因。
+   * 200ms 窗口可将 CardKit 调用频率降至 ~5次/秒，与 Vercel AI SDK
+   * 的 experimental_throttle(50ms) 思路一致，但更宽松以适配服务端 API。
+   */
+  private scheduleConclusionRender(): void {
+    if (this.conclusionTimer) {
+      clearTimeout(this.conclusionTimer)
+    }
+    this.conclusionTimer = setTimeout(() => {
+      this.conclusionTimer = null
+      this.enqueue(() => this.renderConclusion())
+    }, 200)
+  }
+
+  /**
+   * 立即 flush 挂起的 debounce 定时器（close/drain 前调用）。
+   */
+  private flushConclusionTimer(): void {
+    if (this.conclusionTimer) {
+      clearTimeout(this.conclusionTimer)
+      this.conclusionTimer = null
+      this.enqueue(() => this.renderConclusion())
     }
   }
 

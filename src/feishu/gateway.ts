@@ -136,6 +136,9 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   // EventDispatcher 是飞书 SDK 的事件分发核心；这里只注册我们真正关心的几类事件。
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data: Record<string, unknown>) => {
+      // catch 块需要这两个值来发送兜底消息，提前声明。
+      let fallbackChatId: string | undefined
+      let fallbackShouldReply = false
       try {
         log("info", "收到飞书事件", {
           keys: Object.keys(data || {}),
@@ -145,6 +148,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
 
         const chatId = message.chat_id as string | undefined
         if (!chatId) return
+        fallbackChatId = chatId
 
         const messageId = message.message_id as string | undefined
         // 去重必须尽早做，避免后面一整条消息链路重复执行。
@@ -179,6 +183,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
             botOpenId,
           )
         }
+        fallbackShouldReply = shouldReply
 
         const sender = (data as { sender?: { sender_id?: { open_id?: string } } }).sender
         const senderId = sender?.sender_id?.open_id ?? ""
@@ -214,6 +219,16 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         log("error", "消息处理错误", {
           error: err instanceof Error ? err.message : String(err),
         })
+        if (fallbackShouldReply && fallbackChatId) {
+          larkClient.im.message.create({
+            data: {
+              receive_id: fallbackChatId,
+              msg_type: "text",
+              content: JSON.stringify({ text: "⚠️ 消息处理异常，请重试" }),
+            },
+            params: { receive_id_type: "chat_id" },
+          }).catch(() => {})
+        }
       }
     },
     "im.chat.member.bot.added_v1": async (data: Record<string, unknown>) => {
@@ -280,6 +295,15 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
                 targetChatId,
                 operatorId: action.operatorId,
               })
+              // toast 已在 IIFE 外返回"已发送"，这里尽力补一条错误消息告知用户。
+              await larkClient.im.message.create({
+                data: {
+                  receive_id: targetChatId,
+                  msg_type: "text",
+                  content: JSON.stringify({ text: "⚠️ 消息发送失败：无法确定目标会话类型" }),
+                },
+                params: { receive_id_type: "chat_id" },
+              }).catch(() => {})
               return
             }
             if (!parsedAction.chatType) {
@@ -305,6 +329,15 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
             log("error", "send_message 按钮处理失败", {
               error: err instanceof Error ? err.message : String(err),
             })
+            // toast 已返回"已发送"，尽力补一条错误消息。
+            larkClient.im.message.create({
+              data: {
+                receive_id: targetChatId,
+                msg_type: "text",
+                content: JSON.stringify({ text: "⚠️ 消息发送失败，请重试" }),
+              },
+              params: { receive_id_type: "chat_id" },
+            }).catch(() => {})
           })
           // 即使后台还没处理完，也要马上给飞书回一个 toast。
           return buildCallbackResponse(action, log)

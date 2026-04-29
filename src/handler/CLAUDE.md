@@ -115,7 +115,7 @@
 
 ### `mirrorTextToMessage`（chat.ts 写 / event.ts 读）
 
-- CardKit 不可用或 `StreamingCard.start()` 失败时，`chat.ts` 在 `thinkingDelay` 后会发一条纯文本“正在思考…”占位消息。
+- CardKit 不可用或 `StreamingCard.start()` 失败时，`chat.ts` 立即发一条纯文本”正在思考…”占位消息。
 - 该占位走 `registerPending({ placeholderId, feishuClient, mirrorTextToMessage: true })` 注册到 pending 表。
 - `event.ts` 处理 `message.part.updated` 时读该 flag：`true` 直接更新飞书文本消息；否则走 `streamingCard` 卡片更新。
 - 改 `chat.ts` 的 fallback 注册逻辑必须同步检查 `event.ts` 的 mirror 分支；反之亦然。该路径无法承载 abort 按钮，是有意的降级代价。

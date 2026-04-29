@@ -11,6 +11,7 @@
  */
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
+import type { OpencodeClient as V2OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { randomUUID } from "node:crypto"
 import * as sender from "../feishu/sender.js"
 import {
@@ -133,6 +134,68 @@ async function fetchActualModel(
   }
 }
 
+/**
+ * 扫描 session 历史，定位并删除中毒消息。
+ *
+ * 根据 poison rule 决定扫描策略：
+ * - file-part-media-type：找含非图片 file part 的消息
+ * - localshell-schema / zoderror-localshell：找含 local_shell tool part 的消息
+ *
+ * @returns true = 成功删除，调用方应重发 prompt；false = 未找到或删除失败
+ */
+async function findAndCleanPoisonedMessage(params: {
+  v2Client: V2OpencodeClient
+  sessionId: string
+  rule: string
+  directory?: string
+  log: LogFn
+}): Promise<boolean> {
+  const { v2Client, sessionId, rule, directory, log } = params
+
+  try {
+    const res = await v2Client.session.messages({ sessionID: sessionId, directory })
+    const messages = res.data as Array<{ info: { id: string }; parts: Array<Record<string, unknown>> }> | undefined
+    if (!messages?.length) return false
+
+    let targetMessageId: string | undefined
+
+    for (const msg of messages) {
+      for (const part of msg.parts) {
+        if (rule === "poison/file-part-media-type" && part.type === "file") {
+          const mime = (part.mime as string) ?? ""
+          if (mime && !mime.startsWith("image/")) {
+            targetMessageId = msg.info.id
+            break
+          }
+        } else if (
+          (rule === "poison/localshell-schema" || rule === "poison/zoderror-localshell")
+          && part.type === "tool"
+          && (part.tool as string) === "local_shell"
+        ) {
+          targetMessageId = msg.info.id
+          break
+        }
+      }
+      if (targetMessageId) break
+    }
+
+    if (!targetMessageId) {
+      log("warn", "未找到可清理的中毒消息", { sessionId, rule })
+      return false
+    }
+
+    await v2Client.session.deleteMessage({ sessionID: sessionId, messageID: targetMessageId, directory })
+    log("info", "已删除中毒消息", { sessionId, rule, deletedMessageId: targetMessageId })
+    return true
+  } catch (err) {
+    log("error", "清理中毒消息失败", {
+      sessionId, rule,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return false
+  }
+}
+
 /** 对话处理所需的运行依赖。 */
 export interface ChatDeps {
   config: ResolvedConfig
@@ -142,6 +205,8 @@ export interface ChatDeps {
   directory: string
   cardkit?: CardKitClient
   interactiveDeps?: InteractiveDeps
+  /** v2 client（扁平参数），用于 v1 不支持的方法（如 deleteMessage）。 */
+  v2Client?: V2OpencodeClient
 }
 
 interface AssistantSnapshot {
@@ -292,7 +357,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   }
 
   const timeout = config.timeout
-  const thinkingDelay = config.thinkingDelay
   const pollInterval = config.pollInterval
   const stablePolls = config.stablePolls
   const run = createReplyRun({
@@ -309,8 +373,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   let observedRunState: ReplyRunState = run.state
 
   let placeholderId = ""
-  // `done` 用于避免 thinking timer 在主流程已结束后再异步发出占位消息。
-  let done = false
   let activeSessionId = session.id
   let streamingCard: StreamingCard | undefined
 
@@ -348,46 +410,32 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     }
   }
 
-  // 如果没有流式卡片，则在 thinkingDelay 到达后发一条传统“正在思考…”消息。
-  const timer =
-    !streamingCard && thinkingDelay > 0
-      ? setTimeout(async () => {
-          if (done) return
-          try {
-            const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…", log)
-            // 发送是异步的；如果主流程已经结束，要把这条“迟到”的占位消息删掉。
-            if (done) {
-              if (res.ok && res.messageId) {
-                await sender.deleteMessage(feishuClient, res.messageId, log)
-              }
-              return
-            }
-            if (!res.ok) {
-              log("error", "发送占位消息失败", {
-                chatId,
-                sessionId: activeSessionId,
-                error: res.error ?? "unknown",
-              })
-              return
-            }
-            if (res.messageId) {
-              placeholderId = res.messageId
-              attachRunCard(run.runId, { cardMessageId: placeholderId })
-              // 只有传统占位消息路径需要注册 pending，让 event.ts 直接更新飞书消息内容。
-              registerPending(activeSessionId, {
-                placeholderId,
-                feishuClient,
-                mirrorTextToMessage: true,
-              })
-            }
-          } catch (err) {
-            log("error", "发送占位消息失败", {
-              chatId,
-              error: err instanceof Error ? err.message : String(err),
-            })
-          }
-        }, thinkingDelay)
-      : null
+  // CardKit 不可用时立即发一条纯文本占位，让 event.ts 通过 mirrorTextToMessage 持续更新。
+  if (!streamingCard) {
+    try {
+      const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考...", log)
+      if (res.ok && res.messageId) {
+        placeholderId = res.messageId
+        attachRunCard(run.runId, { cardMessageId: placeholderId })
+        registerPending(activeSessionId, {
+          placeholderId,
+          feishuClient,
+          mirrorTextToMessage: true,
+        })
+      } else {
+        log("error", "发送占位消息失败", {
+          chatId,
+          sessionId: activeSessionId,
+          error: res.error ?? "unknown",
+        })
+      }
+    } catch (err) {
+      log("error", "发送占位消息失败", {
+        chatId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   // 订阅 action-bus：详情/工具更新驱动结构化结果卡，权限/问答事件驱动独立交互卡片。
   let cardUnsub: (() => void) | undefined
@@ -587,25 +635,79 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     await matchPluginError(pluginError, {
       SessionPoisoned: async (e) => {
-        log("error", "检测到 session 历史数据中毒，创建新 session", {
+        log("error", "检测到 session 历史数据中毒", {
           sessionKey, oldSessionId: session.id, rule: e.rule,
         })
-        invalidateSession(sessionKey)
-        completeReplyRun(run.runId, "failed")
-        if (streamingCard) {
-          await streamingCard.setRunState("failed", "failed")
+
+        // L1: 尝试精准删除中毒消息后在同一 session 上重发 prompt。
+        let recovered = false
+        if (deps.v2Client) {
+          const cleaned = await findAndCleanPoisonedMessage({
+            v2Client: deps.v2Client,
+            sessionId: session.id,
+            rule: e.rule,
+            directory,
+            log,
+          })
+
+          if (cleaned) {
+            timedOut = false
+            clearSessionError(session.id)
+            const recoveryRequestMessageId = createPromptMessageId()
+            requestMessageIds.push(recoveryRequestMessageId)
+            addRunRequestMessageId(run.runId, recoveryRequestMessageId)
+
+            try {
+              await client.session.promptAsync({
+                path: { id: session.id },
+                query,
+                body: { ...baseBody, messageID: recoveryRequestMessageId },
+              })
+
+              const finalText = await poll(client, session.id, {
+                timeout, pollInterval, stablePolls, query,
+                signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
+              })
+
+              const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+              const terminalState = timedOut ? "timed_out" : "completed"
+              completeReplyRun(run.runId, terminalState)
+              if (streamingCard) {
+                await streamingCard.setRunState(terminalState, terminalState)
+              }
+              await finalizeReply({
+                streamingCard, feishuClient, chatId, placeholderId, log,
+                actualModel, title: replyTitle, state: terminalState,
+                conclusion: finalText || latestSnapshot.text || (timedOut ? "⚠️ 响应超时" : undefined),
+                detailsPhases: detailPhases.values(),
+              })
+              recovered = true
+              log("info", "session 中毒恢复成功（已删除不兼容消息）", {
+                sessionKey, sessionId: session.id, rule: e.rule,
+              })
+            } catch (recoveryErr) {
+              log("error", "删除中毒消息后重发 prompt 失败，降级到新建 session", {
+                sessionKey, rule: e.rule,
+                error: recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr),
+              })
+            }
+          }
         }
-        await finalizeReply({
-          streamingCard,
-          feishuClient,
-          chatId,
-          placeholderId,
-          log,
-          title: replyTitle,
-          state: "failed",
-          conclusion: "⚠️ 会话历史包含不兼容数据，已自动重置。请重新发送消息。",
-          detailsPhases: detailPhases.values(),
-        })
+
+        // L2: 恢复失败或 v2Client 不可用 — 废弃 session，用户需重发消息。
+        if (!recovered) {
+          invalidateSession(sessionKey)
+          completeReplyRun(run.runId, "failed")
+          if (streamingCard) {
+            await streamingCard.setRunState("failed", "failed")
+          }
+          await finalizeReply({
+            streamingCard, feishuClient, chatId, placeholderId, log,
+            title: replyTitle, state: "failed",
+            conclusion: "⚠️ 会话历史包含不兼容数据，已自动重置。请重新发送消息。",
+            detailsPhases: detailPhases.values(),
+          })
+        }
       },
 
       ModelUnavailable: async (e) => {
@@ -733,9 +835,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       },
     })
   } finally {
-    done = true
-    // 无论成功失败，都要把延迟占位计时器、订阅和 pending 状态回收掉。
-    if (timer) clearTimeout(timer)
     if (cardUnsub) cardUnsub()
     unregisterPending(activeSessionId)
   }
@@ -777,11 +876,12 @@ async function buildPromptParts(
 
   if (messageType === "text") {
     let promptText = textContent
+    const messageMeta = senderName ? { open_id: senderId, sender_name: senderName } : undefined
     if (senderName) {
       // 群聊文本消息前面补 `[用户名]:`，帮助模型区分多说话人场景。
       promptText = `[${senderName}]: ${textContent}`
     }
-    return [{ type: "text", text: quotePrefix + promptText }]
+    return [{ type: "text", text: quotePrefix + promptText, metadata: messageMeta }]
   }
 
   // 非文本消息：交给更专门的 extractor 处理资源、富文本和卡片结构。
@@ -789,8 +889,9 @@ async function buildPromptParts(
 
   // 非文本消息如果也有引用或群聊用户名前缀，则在最前面插一个 text part。
   const prefix = [quotePrefix, senderName ? `[${senderName}]:` : ""].filter(Boolean).join("")
+  const messageMeta = senderName ? { open_id: senderId, sender_name: senderName } : undefined
   if (prefix && parts.length > 0) {
-    return [{ type: "text", text: prefix }, ...parts]
+    return [{ type: "text", text: prefix, metadata: messageMeta }, ...parts]
   }
 
   return parts

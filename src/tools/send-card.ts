@@ -38,14 +38,17 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
       "发送格式化卡片消息到当前飞书会话。支持 22 种 Card 2.0 组件：" +
       "markdown 正文、分割线、备注、交互按钮、图片、表格、折叠面板、" +
       "输入框、下拉选择、日期/时间选择器、复选框、人员选择等。" +
-      "按钮点击等同用户发送消息。卡片作为独立消息发送，不影响流式回复。" +
-      "本工具只负责将 agent 已决定的内容渲染为卡片，不补全主题、摘要或结论。",
+      "仅使用工具 schema 明确支持的 section 类型和字段。" +
+      "卡片作为独立消息发送，不影响流式回复。" +
+      "本工具只负责将 agent 已决定的内容渲染为卡片，不补全主题、摘要或结论。" +
+      "普通按钮点击触发用户消息回复，agent 继续当前运行；仅专门的 abort 按钮会中断当前运行。" +
+      "单张卡片内容不超过 30KB（飞书限制）。markdown 支持粗体、斜体、链接、代码块、列表、标题；HTML 标签会被自动移除。每个 actions 区块最多 5 个按钮，按钮文本建议 2-6 字。",
     args: {
       title: z.string().describe("卡片标题"),
       template: z
         .enum(TEMPLATE_COLORS)
         .default("blue")
-        .describe("标题颜色主题"),
+        .describe("标题颜色主题：blue=信息/中性, green=成功/完成, orange=警告/注意, red=错误/严重, purple=特殊/创意, grey=次要/辅助"),
       sections: z
         .array(
           z.object({
@@ -71,7 +74,7 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
             content: z
               .string()
               .optional()
-              .describe("区块内容（markdown 格式，divider/actions 类型无需此字段）"),
+              .describe("区块内容（飞书 markdown 子集：粗体、斜体、链接、代码块、行内代码、列表、标题 h1-h6。HTML 标签会被自动移除。divider/actions 类型无需此字段）"),
             buttons: z
               .array(
                 z.object({
@@ -80,11 +83,12 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
                   style: z
                     .enum(["primary", "default", "danger"])
                     .default("default")
-                    .describe("按钮样式"),
+                    .describe("按钮样式：primary=高亮推荐, default=普通, danger=危险操作红色"),
                 }),
               )
+              .max(5)
               .optional()
-              .describe("按钮列表（仅 actions 类型使用）"),
+              .describe("按钮列表（仅 actions 类型使用，最多 5 个）"),
             imageKey: z.string().optional().describe("图片 key（image/image_list 类型）"),
             alt: z.string().optional().describe("图片描述文字"),
             userId: z.string().optional().describe("用户 open_id（person 类型）"),
