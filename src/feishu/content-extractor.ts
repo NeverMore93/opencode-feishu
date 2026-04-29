@@ -10,7 +10,7 @@ import { downloadMessageResource, guessMimeByFilename, type DownloadResult } fro
 
 /** OpenCode 侧当前真正会消费的 part 结构。 */
 export type PromptPart =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; metadata?: Record<string, unknown> }
   | { type: "file"; mime: string; url: string; filename?: string }
 
 type PostElement = { tag?: string; text?: string; href?: string; image_key?: string }

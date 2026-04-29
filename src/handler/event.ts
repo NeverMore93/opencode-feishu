@@ -476,7 +476,7 @@ async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void
       path: { id: sessionId },
       query,
       // `synthetic: true` 用来告诉 OpenCode：这是插件的内部催促，不是用户显式输入。
-      body: { parts: [{ type: "text", text: deps.nudge.message, synthetic: true } as const] },
+      body: { parts: [{ type: "text", text: deps.nudge.message, synthetic: true, metadata: { compaction_continue: true } } as const] },
     })
   } catch (err) {
     log("error", "session.idle 催促失败", {

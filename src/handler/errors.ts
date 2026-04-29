@@ -27,7 +27,6 @@ export type RuleName =
   | "model/provider-not-found"
   | "model/unknown-error-with-pattern"
   | "poison/file-part-media-type"
-  | "poison/tool-choice-type"
   | "poison/localshell-schema"
   | "poison/zoderror-localshell"
 
@@ -135,7 +134,6 @@ const POISON_NAME_WHITELIST = new Set([
 /** 条件 B 子串模式。 */
 const POISON_SUBSTRING_PATTERNS: ReadonlyArray<{ pattern: string; rule: RuleName }> = [
   { pattern: "file part media type", rule: "poison/file-part-media-type" },
-  { pattern: "tool choice type",     rule: "poison/tool-choice-type" },
 ]
 
 /** 条件 B 正则模式。 */
@@ -151,6 +149,7 @@ const MODEL_PATTERNS = [
   /model\s+is\s+not\s+(available|supported)/i,
   /modelnotfound/i,
   /model_not_found/i,
+  /tool\s+choice\s+type/i,
 ]
 
 const tryUnauthorized: Probe<"Unauthorized"> = (raw, collect) => {

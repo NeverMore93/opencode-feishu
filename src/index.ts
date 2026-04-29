@@ -15,7 +15,7 @@
 // ────────────────── Node.js 内置模块 ──────────────────
 import { readFileSync, existsSync } from "node:fs"  // 文件读取和存在性检查（同步版，仅启动阶段使用）
 import { join } from "node:path"                     // 跨平台路径拼接
-import { fileURLToPath } from "node:url"             // 将 import.meta.url 转为文件系统路径（用于定位 skills/ 目录）
+import { fileURLToPath } from "node:url"             // 将 import.meta.url 转为文件系统路径（用于定位 prompts/ 目录）
 import { homedir } from "node:os"                    // 获取用户主目录（~/.config/opencode/plugins/feishu.json）
 
 // ────────────────── 飞书 SDK ──────────────────
@@ -51,31 +51,17 @@ const LOG_PREFIX = "[feishu]"
 const isDebug = !!process.env.FEISHU_DEBUG
 
 /**
- * 从 skills/ 目录加载飞书运行时 prompt（system prompt 片段）。
+ * 从 prompts/ 目录加载飞书运行时 prompt（system prompt 片段）。
  *
  * 这里只注入飞书渠道事实和工具契约，不注入任何会塑形 agent 输出策略的维护文档。
  * 内容在插件启动时读取一次，修改后重启即生效（无需重新构建）。
  *
- * @returns 飞书运行时 prompt 字符串；prompt 文件缺失时返回最小化 fallback 提示
+ * @returns 飞书运行时 prompt 字符串；prompt 文件缺失时直接抛错阻止启动
  */
 function loadFeishuRuntimePrompt(): string {
-  // 基于当前模块路径回溯到项目根目录下的 skills/ 文件夹
-  const promptPath = join(fileURLToPath(import.meta.url), "../../skills/feishu-card-interaction/prompt.md")
-  if (existsSync(promptPath)) {
-    return readFileSync(promptPath, "utf-8")
-  }
-  // fallback：prompt 文件缺失时使用最小提示，确保 agent 至少知道飞书渠道和工具边界
-  return [
-    "当前会话来自飞书（Feishu/Lark）。",
-    "",
-    "可用工具：`feishu_send_card`。",
-    "该工具会发送一条独立卡片消息，不替代当前主回复。",
-    "",
-    "工具约束：",
-    "- 仅使用工具 schema 明确支持的 section 和字段。",
-    "- 普通 actions 按钮不等于中断当前运行；只有存在专门 abort 回调时，才可视为中断。",
-    "- 该工具负责渲染你已经决定好的内容，不负责替你补全标题、摘要、结论或改写语义。",
-  ].join("\n")
+  // 基于当前模块路径回溯到项目根目录下的 prompts/ 文件夹
+  const promptPath = join(fileURLToPath(import.meta.url), "../../prompts/feishu-card-interaction/prompt.md")
+  return readFileSync(promptPath, "utf-8")
 }
 
 /** 缓存的飞书运行时 prompt，在模块加载时一次性读取 */
@@ -163,6 +149,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
         directory: resolvedConfig.directory,
         cardkit,
         interactiveDeps,
+        v2Client,
       })
     },
     onBotAdded: (chatId) => {
