@@ -159,7 +159,9 @@ async function findAndCleanPoisonedMessage(params: {
 
     let targetMessageId: string | undefined
 
-    for (const msg of messages) {
+    // 倒序扫描：中毒消息通常是最近一条，从末尾找更快
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
       for (const part of msg.parts) {
         if (rule === "poison/file-part-media-type" && part.type === "file") {
           const mime = (part.mime as string) ?? ""
