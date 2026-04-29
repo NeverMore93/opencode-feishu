@@ -61,7 +61,12 @@ const isDebug = !!process.env.FEISHU_DEBUG
 function loadFeishuRuntimePrompt(): string {
   // 基于当前模块路径回溯到项目根目录下的 prompts/ 文件夹
   const promptPath = join(fileURLToPath(import.meta.url), "../../prompts/feishu-card-interaction/prompt.md")
-  return readFileSync(promptPath, "utf-8")
+  try {
+    return readFileSync(promptPath, "utf-8")
+  } catch {
+    // prompt 文件是 npm 包的一部分，缺失说明安装损坏；用最小化 fallback 保证插件可启动
+    return "You are in a Feishu IM session. Main reply goes to the streaming card via text parts."
+  }
 }
 
 /** 缓存的飞书运行时 prompt，在模块加载时一次性读取 */
