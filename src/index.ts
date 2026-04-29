@@ -56,17 +56,12 @@ const isDebug = !!process.env.FEISHU_DEBUG
  * 这里只注入飞书渠道事实和工具契约，不注入任何会塑形 agent 输出策略的维护文档。
  * 内容在插件启动时读取一次，修改后重启即生效（无需重新构建）。
  *
- * @returns 飞书运行时 prompt 字符串；prompt 文件缺失时返回最小化 fallback 提示
+ * @returns 飞书运行时 prompt 字符串；prompt 文件缺失时直接抛错阻止启动
  */
 function loadFeishuRuntimePrompt(): string {
   // 基于当前模块路径回溯到项目根目录下的 prompts/ 文件夹
   const promptPath = join(fileURLToPath(import.meta.url), "../../prompts/feishu-card-interaction/prompt.md")
-  try {
-    return readFileSync(promptPath, "utf-8")
-  } catch {
-    // prompt 文件是 npm 包的一部分，缺失说明安装损坏；用最小化 fallback 保证插件可启动
-    return "You are in a Feishu IM session. Main reply goes to the streaming card via text parts."
-  }
+  return readFileSync(promptPath, "utf-8")
 }
 
 /** 缓存的飞书运行时 prompt，在模块加载时一次性读取 */
