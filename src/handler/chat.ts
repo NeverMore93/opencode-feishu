@@ -105,7 +105,7 @@ function traceLangfuseUser(
  * 避免把上一轮对话的模型误展示到当前卡片。
  */
 function createPromptMessageId(): string {
-  return randomUUID()
+  return `msg_${randomUUID()}`
 }
 
 /**
