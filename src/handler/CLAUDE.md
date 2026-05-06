@@ -84,8 +84,6 @@
 
 错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）。
 
-**Phase 0 临时日志**：`session.error.raw-shape` 记录完整 error 形状（name、keys、data.message），用于 spec 027 真实样本采集。此日志在 027 主 PR 合入后删除。
-
 **L1** event.ts 缓存 raw error 对象 + 提取消息字符串。`classify()` 在 chat.ts catch 块中消费 raw error，按优先级链判定 kind。
 
 **L2** `pollForResponse()` 每次轮询检查 SSE 缓存错误，检测到立即终止（~1s 内）。

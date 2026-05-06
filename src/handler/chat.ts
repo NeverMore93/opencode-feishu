@@ -271,7 +271,7 @@ async function finalizeReply(params: FinalizeReplyParams): Promise<void> {
     runId: "fallback",
     title,
     state,
-    conclusion: resolvedConclusion,
+    replyText: resolvedConclusion,
     detailsMarkdown,
     fallbackMode: "simple",
   })

@@ -315,7 +315,8 @@ export function createSendCardTool(deps: SendCardDeps): ToolDefinition {
       "卡片作为独立消息发送，不影响流式回复。" +
       "本工具只负责将 agent 已决定的内容渲染为卡片，不补全主题、摘要或结论。" +
       "普通按钮点击触发用户消息回复，agent 继续当前运行；仅专门的 abort 按钮会中断当前运行。" +
-      "单张卡片内容不超过 30KB（飞书限制）。markdown 支持粗体、斜体、链接、代码块、列表、标题；HTML 标签会被自动移除。actions section 用于呈现一组互斥的下一步动作选项，每个 actions 区块最多 5 个按钮，button.value 直接成为下一轮 user prompt 文本。form section 用于一次性收集多字段结构化输入，用户填写中间状态不触发回调，仅 submit 按钮触发一次 form_value 回传，form_value 字典键来自子组件 name 字段。",
+      "单张卡片内容不超过 30KB（飞书限制）。markdown 支持粗体、斜体、链接、代码块、列表、标题；HTML 标签会被自动移除。actions section 用于呈现一组互斥的下一步动作选项，每个 actions 区块最多 5 个按钮，button.value 直接成为下一轮 user prompt 文本。form section 用于一次性收集多字段结构化输入，用户填写中间状态不触发回调，仅 submit 按钮触发一次 form_value 回传，form_value 字典键来自子组件 name 字段。" +
+      "适合交互性输出（确认、选择、输入）使用按钮或输入组件；结构化或较长内容适合用分区和折叠面板展示。",
     args: {
       title: z.string().describe("卡片标题"),
       template: z

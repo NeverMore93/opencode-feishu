@@ -346,19 +346,6 @@ function handleSessionErrorEvent(event: Event, deps: EventDeps): void {
 
   deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
 
-  // Phase 0 临时采样日志：记录完整 error 形状，为主 PR 的回归 fixtures 提供真实样本。
-  // 此日志在 027 主 PR 合入后删除（T035）。
-  const e = error as Record<string, unknown> | undefined
-  deps.log("warn", "session.error.raw-shape", {
-    errorName: (e as { name?: string })?.name,
-    errorKeys: e && typeof e === "object" ? Object.keys(e) : [],
-    dataKeys: (e as { data?: Record<string, unknown> })?.data && typeof (e as { data?: Record<string, unknown> }).data === "object"
-      ? Object.keys((e as { data: Record<string, unknown> }).data)
-      : [],
-    dataMessage: ((e as { data?: { message?: string } })?.data?.message ?? "").slice(0, 500),
-    sessionId,
-  })
-
   sessionErrors.set(sessionId, { message: errMsg, raw: error })
 
   // 不在此处做 fork 恢复或向用户发送错误——统一由 chat.ts catch 块处理
