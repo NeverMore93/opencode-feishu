@@ -979,10 +979,14 @@ async function pollForResponse(
     // 再 fetch 一次最终消息列表，尽可能拿到最完整文本。
     const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
     const finalSnapshot = extractLastAssistantSnapshot(finalMessages ?? [])
-    if (hasAssistantSnapshotChanged(finalSnapshot, lastSnapshot) && onSnapshot) {
-      await onSnapshot(finalSnapshot)
+    // 忽略与 baseline 相同的旧 turn 快照，避免返回上一轮的文本。
+    const effectiveSnapshot = (baseline && !hasAssistantSnapshotChanged(finalSnapshot, baseline))
+      ? lastSnapshot
+      : finalSnapshot
+    if (hasAssistantSnapshotChanged(effectiveSnapshot, lastSnapshot) && onSnapshot) {
+      await onSnapshot(effectiveSnapshot)
     }
-    return finalSnapshot.text || lastSnapshot.text
+    return effectiveSnapshot.text || lastSnapshot.text
   } finally {
     unsub()
   }
@@ -1110,10 +1114,12 @@ function extractAssistantModel(
   }>,
 ): string | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const assistant = messages[index]?.info
-    if (assistant?.role !== "assistant") continue
-    const providerID = typeof assistant.providerID === "string" ? assistant.providerID.trim() : ""
-    const modelID = typeof assistant.modelID === "string" ? assistant.modelID.trim() : ""
+    const info = messages[index]?.info
+    // 遇到 user message 说明已离开当前 turn，停止搜索避免拾取旧 turn 的模型信息。
+    if (info?.role === "user") break
+    if (info?.role !== "assistant") continue
+    const providerID = typeof info.providerID === "string" ? info.providerID.trim() : ""
+    const modelID = typeof info.modelID === "string" ? info.modelID.trim() : ""
     if (!providerID || !modelID) continue
     return `${providerID}/${modelID}`
   }
