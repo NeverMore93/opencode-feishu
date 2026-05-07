@@ -513,7 +513,10 @@ export async function handleCardAction(
         error: err instanceof Error ? err.message : String(err),
       })
     })
-    return buildToast("success", abortResult.feedback)
+    // toast 用 "info" 进行态：v2Client.session.abort 是 fire-and-forget（line 501-515），
+    // 失败仅 log + resetAbortForRun，不发用户面失败提示。用 "success" 会形成 F21 同构反模式
+    // （toast 完成态 vs async 可能失败）。"info" 表达"已接收请求，正在处理"，与异步结果对齐。
+    return buildToast("info", abortResult.feedback)
   }
 
   if (!deps.v2Client) {
@@ -581,24 +584,28 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
   const value = parseCardActionValue(action.actionValue, log)
   if (!value) return {}
 
+  // permission_reply / question_reply / abort_reply 的实际处理走 fire-and-forget async（见
+  // handleCardAction line 557-565 的 v2Client.permission.reply / question.reply）；toast 必须用
+  // "info" + 进行态文案，避免 F21 同构反模式（toast 完成态 vs async 可能失败的矛盾信号）。
+  // 失败时仅 emitPhase("error",...) 在折叠面板更新，无用户面失败提示——这是已知设计代价。
   if (value.action === "permission_reply") {
     const isReject = value.reply === "reject"
     return {
       toast: {
-        type: isReject ? "warning" : "success",
-        content: isReject ? "❌ 已拒绝" : "✅ 已允许",
+        type: "info",
+        content: isReject ? "🚫 已收到拒绝请求，正在转交..." : "📨 已收到允许请求，正在转交...",
       },
     }
   }
 
   if (value.action === "question_reply") {
     return {
-      toast: { type: "success", content: "✅ 已回答" },
+      toast: { type: "info", content: "📨 已收到回答，正在转交..." },
     }
   }
 
   if (value.action === "abort_reply") {
-    return buildToast("success", "已接收中断请求，正在停止回答")
+    return buildToast("info", "已接收中断请求，正在停止回答")
   }
 
   if (value.action === "send_message") {

@@ -131,3 +131,17 @@
 - 首个 `message.part.updated` 事件到达时把 `part.messageID` 写入 `expectedMessageId`。
 - 之后所有 messageID 不匹配的事件**静默丢弃**，防止同一 session 内多 run 事件串线到当前卡片。
 - 依赖：`session-queue.ts` 的 per-sessionKey FIFO 串行保证首个事件属于当前 run。改队列或 pending 生命周期时必须保留“首锁 + 后过滤”语义。
+
+## 反模式修复回归原则（toast / async fire-and-forget）
+
+修一处反模式（如 `interactive.ts` 中"toast 完成态 + v2Client async fire-and-forget"）后，必须**按结构而非文案**扫描所有同构兄弟。grep 文案（"已发送"/"已收到"）只能命中已知 caller，无法发现结构相同但语义不同的兄弟（如 `permission_reply` / `question_reply` / `abort_reply`）。
+
+实例：v1.10.5 PR #74 修复 F21 send_message + form_submit 的 toast 矛盾信号，但漏扫 3 处同构反模式（v1.10.6 PR-A 补修）。
+
+**修反模式 PR 必须配同构扫描清单**：
+
+1. `void deps.v2Client.*.then().catch(...)` 的所有 caller：toast 必须是进行态（`type: "info"`）
+2. 失败处理是否仅 `emitPhase("error")` / log 而无对等用户面提示：列入待补救
+3. 不写"反模式清零"声明；改写"已修 X / Y / Z 三处实例，结构同构扫描已完成"
+
+详细规则与历史背景见本地 `docs/fallback-design-rules.md § 11`（不入 git，仅作 Claude review 必读输入）。
