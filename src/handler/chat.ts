@@ -12,7 +12,6 @@
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import type { OpencodeClient as V2OpencodeClient } from "@opencode-ai/sdk/v2/client"
-import { randomUUID } from "node:crypto"
 import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
@@ -32,7 +31,6 @@ import type { CardKitClient } from "../feishu/cardkit.js"
 import { StreamingCard } from "../feishu/streaming-card.js"
 import { handlePermissionRequested, handleQuestionRequested, type InteractiveDeps } from "./interactive.js"
 import {
-  addRunRequestMessageId,
   attachRunCard,
   completeReplyRun,
   createReplyRun,
@@ -99,34 +97,19 @@ function traceLangfuseUser(
 }
 
 /**
- * 为当前 prompt 生成稳定的 user messageID。
- *
- * 后续回读实际模型时，只认和这个 ID 关联出来的 assistant message，
- * 避免把上一轮对话的模型误展示到当前卡片。
- */
-function createPromptMessageId(): string {
-  return `msg_${randomUUID()}`
-}
-
-/**
- * 从当前请求关联的 assistant message 读取实际执行模型。
- *
- * 这里优先信任运行结果本身的 `providerID/modelID`，
- * 而不是配置里的默认模型，避免自动恢复或局部 override 后显示错误。
+ * 从 session 最后一条 assistant message 读取实际执行模型。
  */
 async function fetchActualModel(
   client: OpencodeClient,
   sessionId: string,
-  requestMessageIds: readonly string[],
   log: LogFn,
   query?: { directory?: string },
 ): Promise<string | undefined> {
   try {
     const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
-    return extractAssistantModelForRequests(messages ?? [], requestMessageIds)
+    return extractAssistantModel(messages ?? [])
   } catch (err) {
-    // 模型信息只影响卡片辅助展示；读取失败时回退为不展示模型。
-    log("error", "读取本次 assistant 实际模型失败", {
+    log("error", "读取 assistant 实际模型失败", {
       sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
@@ -368,7 +351,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     chatType,
   })
   // 当前用户可见这一轮可能会产生多次 prompt（原始尝试 + 自动恢复），统一记录它们的 messageID。
-  const requestMessageIds: string[] = []
   const detailPhases = new Map<string, DetailPhaseSnapshot>()
   let latestSnapshot: AssistantSnapshot = { text: "", reasoning: "" }
   let timedOut = false
@@ -541,7 +523,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     },
   ) => pollForResponse(currentClient, currentSessionId, {
     ...pollOptions,
-    requestMessageIds,
     onSnapshot: handleSnapshot,
     onTick: syncObservedRunState,
     onTimedOut: () => {
@@ -552,14 +533,10 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   try {
     // 清除前次遗留的 session error 缓存，避免 pollForResponse 误检测旧错误。
     clearSessionError(session.id)
-    const requestMessageId = createPromptMessageId()
-    requestMessageIds.push(requestMessageId)
-    addRunRequestMessageId(run.runId, requestMessageId)
-
     await client.session.promptAsync({
       path: { id: session.id },
       query,
-      body: { ...baseBody, messageID: requestMessageId },
+      body: baseBody,
     })
 
     observedRunState = "running"
@@ -584,7 +561,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     // prompt 成功：清空该 sessionKey 的自动恢复计数。
     clearRetryAttempts(sessionKey)
 
-    const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+    const actualModel = await fetchActualModel(client, session.id, log, query)
     const terminalState = timedOut ? "timed_out" : "completed"
     completeReplyRun(run.runId, terminalState)
     observedRunState = terminalState
@@ -611,7 +588,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       if (streamingCard) {
         await streamingCard.setRunState("aborted", "aborted")
       }
-      const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+      const actualModel = await fetchActualModel(client, session.id, log, query)
       await finalizeReply({
         streamingCard,
         feishuClient,
@@ -655,15 +632,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           if (cleaned) {
             timedOut = false
             clearSessionError(session.id)
-            const recoveryRequestMessageId = createPromptMessageId()
-            requestMessageIds.push(recoveryRequestMessageId)
-            addRunRequestMessageId(run.runId, recoveryRequestMessageId)
 
             try {
               await client.session.promptAsync({
                 path: { id: session.id },
                 query,
-                body: { ...baseBody, messageID: recoveryRequestMessageId },
+                body: baseBody,
               })
 
               const finalText = await poll(client, session.id, {
@@ -671,7 +645,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
                 signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
               })
 
-              const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+              const actualModel = await fetchActualModel(client, session.id, log, query)
               const terminalState = timedOut ? "timed_out" : "completed"
               completeReplyRun(run.runId, terminalState)
               if (streamingCard) {
@@ -714,12 +688,8 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
       ModelUnavailable: async (e) => {
         timedOut = false
-        const recoveryRequestMessageId = createPromptMessageId()
-        requestMessageIds.push(recoveryRequestMessageId)
-        addRunRequestMessageId(run.runId, recoveryRequestMessageId)
         const recovery = await tryModelRecovery({
           pluginError: e, sessionId: session.id, sessionKey, client, directory,
-          requestMessageId: recoveryRequestMessageId,
           parts,
           timeout,
           pollInterval,
@@ -731,7 +701,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
         })
 
         if (recovery.recovered) {
-          const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+          const actualModel = await fetchActualModel(client, session.id, log, query)
           const terminalState = timedOut ? "timed_out" : "completed"
           completeReplyRun(run.runId, terminalState)
           if (streamingCard) {
@@ -752,7 +722,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           return
         }
         // 恢复失败：显示原始模型错误。
-        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        const actualModel = await fetchActualModel(client, session.id, log, query)
         completeReplyRun(run.runId, "failed")
         if (streamingCard) {
           await streamingCard.setRunState("failed", "failed")
@@ -817,7 +787,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           hint: e.hint,
           error: thrownError,
         })
-        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        const actualModel = await fetchActualModel(client, session.id, log, query)
         completeReplyRun(run.runId, "failed")
         if (streamingCard) {
           await streamingCard.setRunState("failed", "failed")
@@ -912,13 +882,12 @@ async function pollForResponse(
     stablePolls: number
     query?: { directory: string }
     signal?: AbortSignal
-    requestMessageIds?: readonly string[]
     onSnapshot?: (snapshot: AssistantSnapshot) => void | Promise<void>
     onTick?: () => void | Promise<void>
     onTimedOut?: () => void
   },
 ): Promise<string> {
-  const { timeout, pollInterval, stablePolls, query, signal, requestMessageIds, onSnapshot, onTick, onTimedOut } = opts
+  const { timeout, pollInterval, stablePolls, query, signal, onSnapshot, onTick, onTimedOut } = opts
   // 轮询开始时间，用于超时判断。
   const start = Date.now()
   // 最近一次看到的 assistant 快照。
@@ -965,7 +934,7 @@ async function pollForResponse(
       }
 
       const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
-      const snapshot = extractAssistantSnapshotForRequests(messages ?? [], requestMessageIds)
+      const snapshot = extractLastAssistantSnapshot(messages ?? [])
 
       if (hasAssistantSnapshotChanged(snapshot, lastSnapshot)) {
         // 看到新快照：更新并重置稳定计数。
@@ -993,7 +962,7 @@ async function pollForResponse(
 
     // 再 fetch 一次最终消息列表，尽可能拿到最完整文本。
     const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
-    const finalSnapshot = extractAssistantSnapshotForRequests(finalMessages ?? [], requestMessageIds)
+    const finalSnapshot = extractLastAssistantSnapshot(finalMessages ?? [])
     if (hasAssistantSnapshotChanged(finalSnapshot, lastSnapshot) && onSnapshot) {
       await onSnapshot(finalSnapshot)
     }
@@ -1107,69 +1076,30 @@ function extractLastAssistantSnapshot(
   }
 }
 
-function extractAssistantSnapshotForRequests(
-  messages: Array<{
-    info: { role?: string; parentID?: unknown; [key: string]: unknown }
-    parts: Array<{ type?: string; text?: string; [key: string]: unknown }>
-  }>,
-  requestMessageIds?: readonly string[],
-): AssistantSnapshot {
-  if (!requestMessageIds || requestMessageIds.length === 0) {
-    return extractLastAssistantSnapshot(messages)
-  }
-
-  const requestIdSet = new Set(requestMessageIds)
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    const info = message?.info
-    if (info?.role !== "assistant") continue
-    const parentID = typeof info.parentID === "string" ? info.parentID.trim() : ""
-    if (!parentID || !requestIdSet.has(parentID)) continue
-    return extractLastAssistantSnapshot([message])
-  }
-
-  return { text: "", reasoning: "" }
-}
-
 function hasAssistantSnapshotChanged(next: AssistantSnapshot, current: AssistantSnapshot): boolean {
   return next.text !== current.text || next.reasoning !== current.reasoning
 }
 
 /**
- * 从当前请求关联的 assistant message 提取真实执行模型。
- *
- * 这里只认 `parentID` 命中的 assistant message，
- * 避免把历史轮次的模型串到当前卡片里。
+ * 从 session 最后一条 assistant message 提取 providerID/modelID。
  */
-function extractAssistantModelForRequests(
+function extractAssistantModel(
   messages: Array<{
     info: {
       role?: string
-      parentID?: unknown
       providerID?: unknown
       modelID?: unknown
       [key: string]: unknown
     }
   }>,
-  requestMessageIds: readonly string[],
 ): string | undefined {
-  if (requestMessageIds.length === 0) return undefined
-  const requestIdSet = new Set(requestMessageIds)
-
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const assistant = messages[index]?.info
     if (assistant?.role !== "assistant") continue
-
-    const parentID = typeof assistant.parentID === "string" ? assistant.parentID.trim() : ""
-    if (!parentID || !requestIdSet.has(parentID)) continue
-
     const providerID = typeof assistant.providerID === "string" ? assistant.providerID.trim() : ""
     const modelID = typeof assistant.modelID === "string" ? assistant.modelID.trim() : ""
-    // 同一轮里可能先出现一个尚未补全模型字段的 assistant 记录，此时继续向前找稳定记录。
     if (!providerID || !modelID) continue
-
     return `${providerID}/${modelID}`
   }
-
   return undefined
 }
