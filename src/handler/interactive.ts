@@ -17,6 +17,17 @@ import {
 } from "./reply-run-registry.js"
 import { emit } from "./action-bus.js"
 
+/**
+ * form_submit toast 文案常量。
+ *
+ * 飞书 card.action.trigger 要求 3 秒内返回，此处的 toast 是同步即时反馈。
+ * 区分两个语义：
+ * - RECEIVED：P3 阻塞型 tool 命中，resolver 已立即返回结果（同步处理完）
+ * - PROCESSING：P1 syntheticCtx 路径或 fallback，已投递异步处理（仍要等 agent）
+ */
+export const FORM_SUBMIT_RECEIVED_TOAST = "📋 已收到提交"
+export const FORM_SUBMIT_PROCESSING_TOAST = "📋 已收到，正在处理..."
+
 /** 交互模块需要的外部依赖。 */
 export interface InteractiveDeps {
   /** 飞书 SDK client，用于实际发送卡片。 */
@@ -592,13 +603,13 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
 
   if (value.action === "send_message") {
     return {
-      toast: { type: "info", content: "📨 已发送" },
+      toast: { type: "info", content: "📨 已收到，正在发送..." },
     }
   }
 
   if (value.action === "form_submit") {
     return {
-      toast: { type: "info", content: "📨 已提交" },
+      toast: { type: "info", content: FORM_SUBMIT_PROCESSING_TOAST },
     }
   }
 

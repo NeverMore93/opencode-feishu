@@ -4,10 +4,10 @@
 > 边界判定框架请见 [`./CLAUDE.md`](./CLAUDE.md) 的"注入边界判定框架"章节。
 
 **初次审计**: 2026-04-28（feature 029 完成时，宪法 v3.1.0）
-**最近更新**: 2026-05-05（审计范围扩展到用户出口 + 删除渲染层越界标签，v1.10.4）
-**适用版本**: v1.10.4
-**审计范围**: 所有进入 agent / LLM 上下文的字符串
-**审计方法**: 直接源码搜索（`session.promptAsync` 调用点 + `output.system.push` + `.describe()` + 占位文本）
+**最近更新**: 2026-05-06（飞书协议响应字段审计 + toast 矛盾信号修复，v1.10.5）
+**适用版本**: v1.10.5
+**审计范围**: plugin 写给 agent / LLM 上下文的字符串 + plugin 写给用户视野的字符串（LLM 入口 + 用户出口）
+**审计方法**: 直接源码搜索（`session.promptAsync` 调用点 + `output.system.push` + `.describe()` + 占位文本 + `toast.content` + `im.message.create` 兜底文本 + 状态文案常量）
 
 ---
 
@@ -64,6 +64,8 @@ v1.10.2 (prompt.md 7 行精简版，行数不变但用词更精确)
 v1.10.3 (prompts/ 同源治理结构)
   ↓ 审计范围扩展（LLM 入口 → LLM 入口 + 用户出口）+ 渲染层债务清理：删除 buildTitleMarkdown / buildConclusionMarkdown / DEFAULT_CONCLUSION，标题升 header.title
 v1.10.4 (Principle 15 v3.2.0 跨 LLM 入口 + 用户出口完整应用)
+  ↓ 飞书协议响应字段审计：新增 § 2.10（toast + im.message.create 兜底文本 + 状态文案常量）；toast 矛盾信号修复（F20+F23 方案 B 中性事实）
+v1.10.5 (用户出口响应字段审计 + toast 矛盾信号修复)
 ```
 
 ### 1.3.1 设计决策：4 行 vs 9 行
@@ -270,6 +272,8 @@ feishu_send_card 发送独立卡片消息，不替代主回复。
 ### 2.9 卡片渲染层（用户出口，v1.10.4 新增审计范围）
 
 > **审计范围扩展说明**：v1.10.3 之前 AUDIT 仅覆盖 LLM 入口（§ 2.1-2.8），漏审 plugin → 用户视野的渲染层注入面。v1.10.4 框架 scope 扩展后纳入此第 9 类。
+>
+> **完整工程流程**（数据如何从 SSE 事件流到飞书 CardKit）见 [`/CLAUDE.reply-rendering.md`](../CLAUDE.reply-rendering.md)——本节是**审计视角**（合规判定），架构文档是**工程视角**（流转契约），互补不重叠。
 
 `src/feishu/result-card-view.ts` 内 StreamingCard 渲染产生的标签和占位文本：
 
@@ -308,6 +312,55 @@ feishu_send_card 发送独立卡片消息，不替代主回复。
 
 **安全风险**: 无（不向 agent 注入；不影响 prompt injection 防护）。
 
+### 2.10 飞书协议响应字段（用户出口，v1.10.5 新增审计范围）
+
+> **审计范围扩展说明**：v1.10.4 框架 scope 扩展到"用户出口"，但 § 2.9 仅覆盖卡片渲染层。飞书协议响应字段（toast、兜底文本、状态文案）是另一类用户出口——plugin 写给飞书 SDK、SDK 直接渲染给用户，不在 LLM 上下文里，但直接塑造用户对 plugin 行为的认知。
+>
+> **与 `docs/fallback-inventory.md` 的关系**：fallback-inventory 从"兜底设计是否正确"视角审查（8 checklist），本节从"注入边界是否越界"视角审查（Principle 15）。两者互补：F20+F23 在 fallback-inventory 是"矛盾信号反模式"，在 AUDIT 是"用户出口越界——端到端事实断言"。
+
+**类别 A：`card.action.trigger` toast 响应**
+
+| # | 来源 | 触发 | toast 内容（当前 v1.10.5） | 历史（v1.10.4 及以前） | 合规 |
+|---|------|------|--------------------------|----------------------|:----:|
+| 10a | `interactive.ts:594-596` | send_message 按钮 | `"📨 已收到，正在发送..."` | `"📨 已发送"` | ✅ 中性事实 |
+| 10b | `interactive.ts:599-602` | form_submit 回退 | `"📋 已收到，正在处理..."` | `"📨 已提交"` | ✅ 中性事实 |
+| 10c | `gateway.ts:494` | form_submit P3 阻塞型 tool | `"📋 已收到提交"` | `"表单已提交"` | ✅ 中性事实 |
+| 10d | `gateway.ts:587` | form_submit P1 非阻塞 | `"📋 已收到，正在处理..."` | `"📨 已提交"` | ✅ 中性事实 |
+| 10e | `interactive.ts:584-586` | question_reply | `"✅ 已回答"` | 同 | ✅ v2Client 同步等结果，端到端事实 |
+| 10f | `interactive.ts:589-591` | abort_reply | `"✅ 已接收中断请求，正在停止回答"` | 同 | ✅ 端到端事实 |
+| 10g | `gateway.ts:472` | form_submit 跨群拒收 | `"⚠️ 该卡片来自其他会话，提交未生效"` | 同 | ✅ |
+| 10h | `interactive.ts:598-612` | 未识别 action | fallback toast | 同 | ✅ |
+
+**类别 B：`im.message.create` 兜底文本（失败时发新消息到聊天）**
+
+| # | 来源 | 触发 | 文本 | 合规 |
+|---|------|------|------|:----:|
+| 11a | `gateway.ts:373-380` | send_message chatType 缺失 | `"⚠️ 消息发送失败：无法确定目标会话类型"` | ✅ |
+| 11b | `gateway.ts:421-428` | send_message 后台异常 | `"⚠️ 消息发送失败，请重试"` | ✅ |
+| 11c | `gateway.ts:530-537` | form_submit chatType 缺失 | `"⚠️ 表单提交处理失败：无法确定目标会话类型"` | ✅ |
+| 11d | `gateway.ts:576-583` | form_submit 后台异常 | `"⚠️ 表单提交处理失败，请重试"` | ✅ |
+| 11e | `gateway.ts:299-309` | gateway 处理异常 + shouldReply | `"⚠️ 消息处理异常，请重试"` | ✅ |
+| 11f | `chat.ts:416-433` | CardKit 降级纯文本 | `"正在思考..."` | ✅ 占位告知 |
+
+**类别 C：状态文案常量（终态文案 + 状态映射）**
+
+| # | 来源 | 触发 | 文本 | 合规 |
+|---|------|------|------|:----:|
+| 12a | `chat.ts:588` | 超时终态 | `"⚠️ 响应超时"` | ✅ |
+| 12b | `chat.ts:628` | abort 终态 | `"已中断，保留当前可见结果。"` | ✅ |
+| 12c | `chat.ts:774-778` | ContextOverflow | `"⚠️ 对话历史过长。请开始新对话（建议先用 /compact 压缩）"` | ✅ |
+| 12d | `chat.ts:793-797` | Unauthorized | `"⚠️ 模型 provider 认证失败，请检查配置"` | ✅ |
+
+**历史问题（v1.10.5 修复）**：
+
+10a/10b/10d（v1.10.4 及以前）使用端到端断言语气（"已发送"/"已提交"），与后台异步失败后发的 ⚠️ 兜底文本构成**矛盾信号**——用户看到"已发送"→ 心理确认完毕 → 收到"发送失败"→ 困惑。v1.10.5 采用方案 B（中性事实 toast）修复：toast 只声明"飞书侧已收到回调"事实，不预判异步处理结果。修复项已在 `docs/fallback-inventory.md` § 4.1 记录为 F20+F23 修复。
+
+**合规依据**（用户出口越界判定）：
+- 禁止模式"端到端断言 in-flight 状态"：toast `"已发送"` 在异步 send_message 尚未返回时就声明端到端成功，等于 plugin 替系统编了用户视角的"事实"——与 § 2.9 9c（替 agent 贴语义标签）和 9d（plugin 编造 agent 内容）同构，都是 plugin 写给用户的字符串越过边界。
+- 允许模式"中性事实回执"：toast `"已收到，正在发送..."` 只声明"飞书侧已收到回调"这个真事实，不预判结果——属于 § 2.9 的"载体级"展示控制。
+
+**安全风险**: 无。toast 和兜底文本不注入 LLM 上下文，不影响 prompt injection 防护。
+
 ---
 
 ## 3. 灰色地带与待对齐项
@@ -320,6 +373,7 @@ feishu_send_card 发送独立卡片消息，不替代主回复。
 | G4 | 不支持类型是否静默 | ⚠️ 待对齐 | `[不支持的消息类型: video_call]` 送入 LLM；是否应用 noReply？ | 中 |
 | G5 | Quote 截断提示 | ⚠️ 待对齐 | 500 字符静默截断，无 `...(已截断)` 后缀 | 低 |
 | G6 | System prompt 段 B | ⚠️ 待对齐 | 工作目录/模型信息可能冗余（OpenCode 已知） | 低-中 |
+| G7 | Toast 矛盾信号（v1.10.5 已修） | ✅ 已修复 | send_message/form_submit toast "已发送"/"已提交" + 后台失败 ⚠️ 兜底 = 矛盾信号；v1.10.5 改为中性"已收到，正在..."，与 fallback-inventory F20+F23 同源 | — |
 
 ### 安全风险项（非 G-item，但值得关注）
 
@@ -340,12 +394,12 @@ feishu_send_card 发送独立卡片消息，不替代主回复。
 - ✅ content-extractor 全部占位字符串：`extractParts` 路径 17 处 + `describeMessageType` 路径 13 处
 - ✅ spec 031 全部 form 注入面
 - ✅ `send-card.ts` 16 个字段 label `.describe()` 调用（line 251, 262-291，均为飞书 schema 约束文案，注入风险可忽略）
+- ✅ 飞书协议响应字段：toast 8 处 + `im.message.create` 兜底文本 6 处 + 状态文案常量 4 处（§ 2.10，v1.10.5）
 
 ### 未覆盖（风险点）
 
 - 未检查 OpenCode SDK 是否还有其他注入入口（如 `chat.params` hook）
 - 未检查 v2Client（permission/question reply）是否注入字符串
-- 未检查飞书 cardkit 渲染中是否有反向回流到 LLM 的内容（理论上没有）
 
 ---
 
@@ -364,3 +418,4 @@ feishu_send_card 发送独立卡片消息，不替代主回复。
 | 2026-05-05 | prompt.md 措辞精简 | 行数不变（仍 7 行），两处用词调整：(1) 删除 `（建议而非强制）` disclaimer——原则句本身非命令式，disclaimer 冗余；(2) `内容上限约 28KB（超出自动截断）` → `超出 28KB 自动截断`，与 `markdown.ts` 精确常量 `MAX_CARD_BYTES = 28 * 1024` 对齐，强调行为而非估算值；演进路径更新为 v1.10.2；1.3.1 节追加 v1.10.2 演进说明 |
 | 2026-05-05 | 审计 + 治理同源化（v1.10.3） | 边界判定框架（原 1.4 + 1.5 节，~50 行）作为治理资产并入 `prompts/CLAUDE.md`；注入点清单、设计背景、修订历史作为镜像资产并入 `prompts/AUDIT.md`（本文件）；`docs/review/review-prompt-injections.md`（gitignored，本地决策记录）删除——审计内容首次进入 git 历史；3 处自指引用（原 1.4/1.5）改写为 `./CLAUDE.md` 链接；`prompts/CLAUDE.md` 治理规则修订（解除 meta-maintenance 自禁悖论 + 显式声明 AUDIT.md 为合法资产 + 新增 AUDIT.md 修订同步约束） |
 | 2026-05-05 | 框架 scope 扩展 + 渲染层债务清理（v1.10.4） | (1) `prompts/CLAUDE.md` 框架 scope 从"LLM 入口"扩展到 "plugin 任意输出（LLM 入口 + 用户出口）"，识别 plugin → 用户视野的渲染层是另一个注入面；(2) 禁止模式 #1 "内容意义干预" 描述补全 (b)(c) 子项（语义标签 + plugin 编造）；(3) AUDIT.md 新增 § 2.9 卡片渲染层第 9 类注入面（7 项 9a-9g）；(4) 代码层删除 `result-card-view.ts:buildTitleMarkdown` / `buildConclusionMarkdown` / `DEFAULT_CONCLUSION = "正在整理结果..."` 三个 v1.7.10 越界遗留；(5) 简化 `buildReplyCardSchema` 从 3-element body（主题/状态/结论）到 2-element body（状态/agent 文本原样）+ 标题升 `header.title`；(6) 新增 `EMPTY_REPLY_PLACEHOLDER = "_⏳ 等待 agent 回复_"` 替代 plugin 编造（斜体明示 UI 占位）；(7) `streaming-card.ts` 同步重命名 `conclusion → replyText`、删除 renderTitle、renderConclusion → renderReply；(8) Principle 15 v3.2.0 在 LLM 入口 + 用户出口两个方向完整落地 |
+| 2026-05-06 | 飞书协议响应字段审计 + toast 矛盾信号修复（v1.10.5） | (1) 新增 § 2.10 飞书协议响应字段第 10 类注入面（toast 8 项 10a-10h + im.message.create 兜底文本 6 项 11a-11f + 状态文案常量 4 项 12a-12d）；(2) 修复 F20+F23 矛盾信号：toast 从端到端断言（"已发送"/"已提交"）改为中性事实（"已收到，正在发送/处理..."），与后台 ⚠️ 兜底文本不再冲突；(3) `prompts/CLAUDE.md` 允许/禁止表增加用户出口侧判定条目（允许：中性事实回执；禁止：端到端断言 in-flight 状态）；(4) § 3 新增 G7 灰色地带条目（已修）；(5) § 4 覆盖性检查更新（飞书协议响应字段 18 处已覆盖）；(6) 交叉链接 `docs/fallback-inventory.md` § 4.1 反模式记录（F20+F23 同源） |

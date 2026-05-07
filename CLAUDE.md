@@ -152,6 +152,8 @@ FEISHU_DEBUG=1 opencode 2>feishu-debug.log            # 重定向到文件
 
 ## 架构设计
 
+> **运行时数据流视图**（一条飞书消息 → agent 输出 → 卡片渲染的 6 stage 完整链路）见独立架构文档 [`./CLAUDE.reply-rendering.md`](./CLAUDE.reply-rendering.md)。本节是**静态组件视图**（哪些文件、谁的职责）。
+
 ### 插件架构
 ```
 OpenCode 加载插件 → src/index.ts (FeishuPlugin)

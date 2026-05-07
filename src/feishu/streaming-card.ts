@@ -1,9 +1,9 @@
 /**
  * StreamingCard：单次 AI 回复对应的一张结构化结果卡。
  *
- * 卡片结构（v1.10.4 起）：
- * - Header.title：用户消息截首行（CardKit 协议字段，创建时设定）
- * - Header.template：state 颜色编码（载体级）
+ * 卡片结构：
+ * - Header.title：用户消息截首行（CardKit 协议字段，创建时设定后不可变）
+ * - Header.template：state 颜色编码（载体级，创建时设定后不可变）
  * - Body element 1: 状态（plugin 自身状态展示，动态更新）
  * - Body element 2: agent 文本原样（无语义标签）
  * - Body element 3: 详细步骤折叠面板（plugin 投影 SSE 事件）
@@ -134,18 +134,6 @@ export class StreamingCard {
     this.replyText = fullText
     if (this.degraded) return
     this.scheduleReplyRender()
-  }
-
-  /**
-   * 更新 meta.title。
-   *
-   * 注：v1.10.4 起标题升到 `header.title`（CardKit 协议字段，创建时设定，
-   * 无 element-level 动态更新 API），因此这里仅更新内部 meta 用于 simple
-   * fallback 文本；不再向飞书 server 推送标题更新。如需变更标题需重建卡片。
-   */
-  async setTitle(title: string): Promise<void> {
-    if (this.closed || !this.cardId || this.terminalState) return
-    this.meta.title = title
   }
 
   async setRunState(state: ReplyRunState, terminalState?: ReplyTerminalState): Promise<void> {

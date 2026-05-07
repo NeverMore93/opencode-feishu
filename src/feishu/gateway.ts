@@ -16,6 +16,8 @@ import {
   type FormSubmitActionValue,
   buildCallbackResponse,
   buildFormSubmitPrompt,
+  FORM_SUBMIT_PROCESSING_TOAST,
+  FORM_SUBMIT_RECEIVED_TOAST,
   normalizeFormValue,
   parseCardActionValue,
   validateChatScopeForFormSubmit,
@@ -369,7 +371,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
                 targetChatId,
                 operatorId: action.operatorId,
               })
-              // toast 已在 IIFE 外返回"已发送"，这里尽力补一条错误消息告知用户。
+              // toast 已返回中性"已收到"语，这里补一条明确失败提示。
               await larkClient.im.message.create({
                 data: {
                   receive_id: targetChatId,
@@ -417,7 +419,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
             log("error", "send_message 按钮处理失败", {
               error: err instanceof Error ? err.message : String(err),
             })
-            // toast 已返回"已发送"，尽力补一条错误消息。
+            // toast 已返回中性"已收到"语，这里补一条明确失败提示。
             larkClient.im.message.create({
               data: {
                 receive_id: targetChatId,
@@ -491,7 +493,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
               formName: formSubmitEnvelope.formName,
               operatorId: formSubmitEnvelope.operatorId,
             })
-            return { toast: { type: "info", content: "表单已提交" } }
+            return { toast: { type: "info", content: FORM_SUBMIT_RECEIVED_TOAST } }
           }
 
           // T028：把 form 提交转化为合成 user message 走 onMessage 链路（同 send_message 模式）。
@@ -584,7 +586,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           })
 
           // 飞书 3 秒回调窗口：异步处理已投递，立即返回 toast。
-          return { toast: { type: "info", content: "📨 已提交" } }
+          return { toast: { type: "info", content: FORM_SUBMIT_PROCESSING_TOAST } }
         }
 
         // 其他交互统一走 onCardAction；由上层决定是否同步返回更精确的 toast。

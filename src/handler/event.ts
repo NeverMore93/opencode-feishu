@@ -145,44 +145,12 @@ export async function handleEvent(
   deps: EventDeps,
 ): Promise<void> {
   switch (event.type) {
-    case "message.part.delta": {
-      const props = (event as any).properties as {
-        sessionID?: string
-        messageID?: string
-        delta?: string
-      }
-      const { sessionID, messageID, delta } = props
-      if (!sessionID || !delta) break
-      const deltaPayload = pendingBySession.get(sessionID)
-      if (!deltaPayload) break
-      if (!matchOrLatchMessageId(deltaPayload, messageID)) return
-      deltaPayload.hasActivity = true
-      deltaPayload.textBuffer += delta
-
-      if (deltaPayload.mirrorTextToMessage && deltaPayload.placeholderId && deltaPayload.textBuffer) {
-        const res = await sender.updateMessage(
-          deltaPayload.feishuClient,
-          deltaPayload.placeholderId,
-          deltaPayload.textBuffer || " ",
-          deps.log,
-        )
-        if (!res.ok) {
-          deps.log("error", "更新飞书占位消息失败（delta）", {
-            sessionId: sessionID,
-            placeholderId: deltaPayload.placeholderId,
-            error: res.error ?? "unknown",
-          })
-        }
-      }
-
-      emit(sessionID, {
-        type: "text-updated",
-        sessionId: sessionID,
-        delta,
-        fullText: deltaPayload.textBuffer,
-      }, deps.log)
-      break
-    }
+    // message.part.delta 不再处理：v1.10.5 起完全依赖 message.part.updated 快照路径。
+    // - 主路径：streaming-card 走 polling onSnapshot（chat.ts:545）整段替换，从未消费 delta
+    // - 降级路径（mirrorTextToMessage=true）：由 message.part.updated 在 handleMessagePartUpdated 中
+    //   sender.updateMessage 兜底（粒度从"逐字打字"退化为"part 级块刷"，但仍可用）
+    // - 移除原因：原 emit "text-updated" 在 chat.ts:446 是 deliberate NO-OP；整条链路 30+ 行
+    //   仅服务降级时的"逐字感"，代价是 reasoning field 污染主回复 textBuffer 的真 bug
     case "message.part.updated": {
       const part = (event as any).properties?.part as { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown } | undefined
       if (!part?.sessionID) break
@@ -281,6 +249,9 @@ async function handleMessagePartUpdated(
   }
 
   // message.part.updated 只处理 text 类型的全量快照（delta 已由 message.part.delta 处理）
+  // 已知忽略的 part type（OpenCode SDK 联合类型 12 个成员，其中 tool/reasoning 已上面分支处理）：
+  // subtask / file / step-start / step-finish / snapshot / patch / agent / retry / compaction
+  // 这些都是 agent 内部状态（步骤边界 / 文件操作 / 压缩等），目前无 use case 需投影到飞书卡片
   if (part.type !== "text") return
 
   const fullText = extractPartText(part)

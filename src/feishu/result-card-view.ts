@@ -183,7 +183,9 @@ export function createReplyCardView(params: {
   terminalState?: ReplyTerminalState
 }): ReplyCardView {
   const title = normalizeReplyTitle(params.title)
-  const replyText = normalizeBlockMarkdown(params.replyText ?? "")
+  // replyText 不在这里 normalize：buildReplyMarkdown / buildSimpleFallbackText 会各自处理
+  // 提前 normalize 会让 cleanMarkdown 跑两次（HTML 解析 + 代码块闭合都重复）
+  const replyText = params.replyText ?? ""
   const terminalState = params.terminalState ?? toTerminalState(params.state)
   return {
     runId: params.runId,
@@ -221,7 +223,7 @@ export function buildReplyCardSchema(view: ReplyCardView): CardKitSchema {
         wide_screen_mode: true,
       },
       header: {
-        title: { tag: "plain_text", content: view.title || DEFAULT_TITLE },
+        title: { tag: "plain_text", content: view.title.trim() || DEFAULT_TITLE },
         template: view.headerTemplate,
       },
       body: {
@@ -287,7 +289,7 @@ export function buildSimpleFallbackText(view: ReplyCardView): string {
   // simple 模式（CardKit 不可用降级）下用纯文本结构。
   // 不给 agent 文本贴语义标签——直接渲染原文，空时用 plugin 占位描述。
   const sections = [
-    `【${view.title || DEFAULT_TITLE}】`,
+    `【${view.title.trim() || DEFAULT_TITLE}】`,
     `状态：${view.compactStatus}`,
     normalizeBlockMarkdown(view.replyText) || EMPTY_REPLY_PLACEHOLDER,
   ]
