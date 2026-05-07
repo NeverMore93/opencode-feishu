@@ -520,6 +520,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       stablePolls: number
       query?: { directory: string }
       signal?: AbortSignal
+      baseline?: AssistantSnapshot
     },
   ) => pollForResponse(currentClient, currentSessionId, {
     ...pollOptions,
@@ -533,6 +534,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   try {
     // 清除前次遗留的 session error 缓存，避免 pollForResponse 误检测旧错误。
     clearSessionError(session.id)
+
+    // 捕获 baseline：promptAsync 前的最后一条 assistant 快照。
+    // 复用 session 时，轮询必须忽略与 baseline 相同的旧 turn 快照。
+    const { data: baselineMessages } = await client.session.messages({ path: { id: session.id }, query }).catch(() => ({ data: undefined }))
+    const baseline = extractLastAssistantSnapshot(baselineMessages ?? [])
+
     await client.session.promptAsync({
       path: { id: session.id },
       query,
@@ -550,6 +557,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       stablePolls,
       query,
       signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
+      baseline,
     })
 
     log("info", "模型响应完成", {
@@ -882,12 +890,14 @@ async function pollForResponse(
     stablePolls: number
     query?: { directory: string }
     signal?: AbortSignal
+    /** promptAsync 前捕获的 baseline，用于忽略旧 turn 的快照。 */
+    baseline?: AssistantSnapshot
     onSnapshot?: (snapshot: AssistantSnapshot) => void | Promise<void>
     onTick?: () => void | Promise<void>
     onTimedOut?: () => void
   },
 ): Promise<string> {
-  const { timeout, pollInterval, stablePolls, query, signal, onSnapshot, onTick, onTimedOut } = opts
+  const { timeout, pollInterval, stablePolls, query, signal, baseline, onSnapshot, onTick, onTimedOut } = opts
   // 轮询开始时间，用于超时判断。
   const start = Date.now()
   // 最近一次看到的 assistant 快照。
@@ -935,6 +945,12 @@ async function pollForResponse(
 
       const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
       const snapshot = extractLastAssistantSnapshot(messages ?? [])
+
+      // 忽略与 baseline 相同的快照（旧 turn 的回复），避免复用 session 时提前收敛。
+      if (baseline && !hasAssistantSnapshotChanged(snapshot, baseline)) {
+        // 快照与 baseline 相同，说明新 turn 尚未产生输出，继续等待。
+        continue
+      }
 
       if (hasAssistantSnapshotChanged(snapshot, lastSnapshot)) {
         // 看到新快照：更新并重置稳定计数。
@@ -1081,7 +1097,7 @@ function hasAssistantSnapshotChanged(next: AssistantSnapshot, current: Assistant
 }
 
 /**
- * 从 session 最后一条 assistant message 提取 providerID/modelID。
+ * 从 session 消息列表末尾反向查找，提取第一个包含完整 providerID/modelID 的 assistant message。
  */
 function extractAssistantModel(
   messages: Array<{
