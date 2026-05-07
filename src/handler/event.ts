@@ -248,7 +248,8 @@ async function handleMessagePartUpdated(
     return
   }
 
-  // message.part.updated 只处理 text 类型的全量快照（delta 已由 message.part.delta 处理）
+  // message.part.updated 只处理 text 类型的全量快照（v1.10.5 起 delta 路径已移除，
+  // 见本文件顶部 switch 注释；正常路径走 polling onSnapshot，降级路径靠 updated 兜底）
   // 已知忽略的 part type（OpenCode SDK 联合类型 12 个成员，其中 tool/reasoning 已上面分支处理）：
   // subtask / file / step-start / step-finish / snapshot / patch / agent / retry / compaction
   // 这些都是 agent 内部状态（步骤边界 / 文件操作 / 压缩等），目前无 use case 需投影到飞书卡片

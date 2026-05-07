@@ -667,29 +667,31 @@ ReplyTerminalState = "completed" | "failed" | "timed_out" | "aborted"
 
 > 基于源码分析和 SDK 文档对比发现的响应处理不合理之处。按优先级排序。
 
+> **v1.10.5 状态更新**：T1 / T3 / T7 通过删除整个 `message.part.delta` case 一并解决（PR #74 commit 7b00548）；T9 经审查为误判（streaming-card.ts L333/L394/L436 各 render 路径已独立 dedup）。本节及第 § 2/3/4.5 节中所有 `event.ts:148-185` 行号引用、`message.part.delta` handler 描述、"delta 累加 vs updated 覆盖"对比均为 v1.10.4 历史快照，**不再反映当前代码**。当前 SSE 流程：`message.part.updated → handleMessagePartUpdated → sender.updateMessage`（mirrorTextToMessage=true 兜底）/ `pollForResponse.onSnapshot`（主路径整段替换）。
+
 ### P1 潜在 bug
 
 | # | 项 | 现状 | 风险 | 建议修法 |
 |---|---|------|------|---------|
-| T1 | delta `field` 未过滤 | event.ts:149-153 用 `as any` 强转，只取 `sessionID/messageID/delta`，丢弃 `field` 和 `partID`。插件已在 line 18-20 定义了含 `field` 的正确类型，但 handler 未使用 | 若 server 发非 text 字段的 delta（如 reasoning），会被错误拼接到 textBuffer | event.ts:155 后加 `if (props.field !== "text") break` |
+| ~~T1~~ | ~~delta `field` 未过滤~~ | **✅ 已修复 (v1.10.5)**：整个 `message.part.delta` case 在 event.ts 已删除（PR #74），reasoning_content 等非 text 字段不再有污染 textBuffer 的路径 | — | — |
 
 ### P2 设计改进
 
 | # | 项 | 现状 | 影响 | 建议 |
 |---|---|------|------|------|
 | T2 | CardKit 失败一次即 degraded，无重试 | streaming-card.ts:303-310 的 `enqueue.catch(markDegraded)` 一次失败永久降级。网络抖动/飞书 API 429 等瞬态错误不应永久放弃 | 用户看到卡片"卡住"（UI 停在最后成功状态），agent 不知道 | enqueue catch 加 1-2 次重试（间隔 500ms），仍失败再 degraded |
-| T3 | delta 累积在正常路径下是白功 | event.ts:160 每秒 30-100 次 `textBuffer += delta`，但 text 消费走 `pollForResponse.onSnapshot`（整段替换）。delta 累积的 textBuffer 仅服务 mirrorTextToMessage 降级路径 | 正常路径下无效 CPU 开销 | 选项 A：加注释标注（零风险）；选项 B：降级触发时才累积（复杂）；选项 C：降级路径改用 snapshot（失去实时性） |
+| ~~T3~~ | ~~delta 累积在正常路径下是白功~~ | **✅ 已修复 (v1.10.5)**：删除 delta case 后 textBuffer 累积循环不再存在；正常路径走 polling onSnapshot 整段替换，降级路径靠 message.part.updated 兜底 | — | — |
 | T4 | 200ms debounce 偏保守 | 注释引用 Vercel AI SDK 的 50ms，但选了 200ms（4 倍）。飞书 CardKit API 限流阈值远高于 5 次/秒 | 用户感知到的"打字速度"被人为压慢 | 实测飞书 API 限流后降到 100-150ms |
-| T5 | 两条 text 路径并存，降级反而更实时 | 正常路径：SSE → textBuffer → polling snapshot → 200ms debounce → CardKit；降级路径：SSE → textBuffer → sender.updateMessage（跳过 debounce） | 降级路径比正常路径更快显示文本，违反直觉 | 统一路径或标注设计意图 |
+| T5 | 两条 text 路径并存，降级反而更实时 | 正常路径：polling snapshot → 200ms debounce → CardKit；降级路径：snapshot → sender.updateMessage（跳过 debounce） | 降级路径比正常路径更快显示文本，违反直觉 | 统一路径或标注设计意图 |
 
 ### P3 代码质量
 
 | # | 项 | 现状 | 建议 |
 |---|---|------|------|
-| T6 | 9 种 Part 类型静默丢弃 | event.ts:284 `if (part.type !== "text") return` 丢弃 subtask/file/step-start/step-finish/snapshot/patch/agent/retry/compaction | 当前不影响主回复卡片。若未来需要展示 step 边界或 compaction 事件，需补充处理 |
-| T7 | `partID` 未使用 | delta 事件的 `partID` 字段完全忽略。当前无影响（同一 message 通常只有一个 text part） | 预留，多 part 并行时需要 |
+| T6 | 9 种 Part 类型静默丢弃 | event.ts handleMessagePartUpdated `if (part.type !== "text") return` 丢弃 subtask/file/step-start/step-finish/snapshot/patch/agent/retry/compaction | 当前不影响主回复卡片。若未来需要展示 step 边界或 compaction 事件，需补充处理 |
+| ~~T7~~ | ~~`partID` 未使用~~ | **✅ 已修复 (v1.10.5)**：delta case 删除后已无 partID 解构需求；多 part 并行如未来需要，应在 message.part.updated 路径上规划 | — |
 | T8 | dedup 检查在 render 阶段而非 enqueue 阶段 | streaming-card.ts:344 的 dedup 在 renderReply 内——此时已过 debounce + enqueue。content 不变时整个周期白做 | 移到 scheduleReplyRender 入口 |
-| T9 | `rendered` 缓存只检查 replyText | streaming-card.ts:344 只比对 `rendered.replyText`，不检查 status/actionsSignature。status 变化但 replyText 不变时会重复 PATCH | 扩展 dedup 到 status/actions |
+| ~~T9~~ | ~~`rendered` 缓存只检查 replyText~~ | **❌ 误判**：streaming-card.ts L333/L394/L436 各 render 路径独立 dedup，跨字段重复 PATCH 物理上不可能。详见 § 9 修订历史 | — |
 
 ---
 
@@ -699,3 +701,4 @@ ReplyTerminalState = "completed" | "failed" | "timed_out" | "aborted"
 |------|------|
 | 2026-05-05 | 创建本架构文档（v1.10.4 渲染层重构后）。基于 3 个并行 subagent 源码精确分析（每条数据带文件:行号引用）：Pipeline Stages / Contracts & Constraints / Edge Cases。修正了之前合成版本的 4 处误解：(1) `text-updated` action 是 deliberate no-op，text 走 polling onSnapshot 路径不经 action-bus；(2) SSE `message.part.updated` 覆盖 textBuffer 是有意设计（event.ts:288 注释明示），不是 bug；(3) `setTitle` 服务端不可变（仅更新 meta，不触发 server PATCH）；(4) Stage 1 拆分 1a/1b 才能精确反映 delta 累积 vs snapshot 替换的分流。命名采用 `CLAUDE.<scope>.md` kebab-case，为未来同类架构文档（`CLAUDE.session-lifecycle.md` / `CLAUDE.error-classification.md` 等）预留扩展空间。 |
 | 2026-05-06 | (1) § 2 从窄幅流程图替换为**字段级全景图**（v1.10.5）：每个节点标注输入/输出类型的关键字段，箭头标注流转字段名，action-bus 4 种事件并排展示，CardKit 元素结构内联，映射表和降级路径作为独立底部区块；(2) 新增 § 10 管道数据类型参考：覆盖完整链路 14 类数据类型，标注 ✱ 管道契约字段；(3) **4 agent 并行源码校验**发现并修复 15 处 diff：compactStatus 文案 2 处（failed/timed_out）、headerTemplate 颜色 2 处（timed_out→orange, aborting→blue）、StreamingCard 缺 2 字段（detailsElementPresent/rendered）、ReplyCardAction 缺 `kind`、CardKitSchema 嵌套层级修正（`data.body.elements`）、补 patchElement 操作、QuestionRequest 补 `tool?` 字段、行号修正 5 处（buildCompactStatus 80-101、resolveHeaderTemplate 103-119、terminalState 冻结点、previousStateBeforeAbort 写入点、expectedMessageId 写入点）。 |
+| 2026-05-07 | **PR #74 (v1.10.5) 后文档维护 + § 11 TODO 清理**：(1) v1.10.5 commit 7b00548 删除整个 `message.part.delta` case（事件、emit、textBuffer 累积全部移除），导致 § 1a / § 2 主图 delta 框 / § 4.5 delta vs updated 对比 / § 6 fallback 双路径图等多处描述失效——本版本在 § 11 顶部加 disclaimer 显式标记这些段落为 v1.10.4 历史快照，TODO T1/T3/T7 标 ✅ 已修复，T9 标 ❌ 误判（CodeRabbit thread 反馈整合）；(2) v1.10.6 PR-A（commit 9a642a5）补修 PR #74 漏扫的 3 个 F21 同构反模式（permission/question/abort toast 完成态 → 进行态），并在 src/handler/CLAUDE.md 加"反模式修复回归原则"指引；(3) **6 agent 并行 fallback 专项审查**完成（reduction-first / drift / checklist / 反模式 / UX 断层 / 阶梯完整性 6 视角）：发现 inventory 自身 4 项重复编号 + 18 项行号偏移 + 3 个未漏扫的 F21 同构反模式（已修） + 多项 UX 断层。详见 PR #74 评论。 |
