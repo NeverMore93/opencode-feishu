@@ -316,7 +316,10 @@ function handleSessionErrorEvent(event: Event, deps: EventDeps): void {
     errMsg = String(error)
   }
 
-  deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
+  // orphan = 错误属于未注册的 session（典型场景：启动期 plugin/MCP 加载失败）；
+  // 这类错误没有主链路消费 sessionErrors 缓存，只能靠日志暴露给运维。
+  const orphan = !pendingBySession.has(sessionId)
+  deps.log("warn", "收到 session.error 事件", { sessionId, errMsg, orphan })
 
   sessionErrors.set(sessionId, { message: errMsg, raw: error })
 

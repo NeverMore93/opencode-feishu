@@ -3,9 +3,13 @@
 > 项目架构文档（运行时数据流视图）。基于源码精确反推：从 OpenCode SSE 事件到飞书 CardKit 卡片的完整转换链路。
 
 **文档类型**: 架构文档（运行时 process view）
-**最近更新**: 2026-05-06（v1.10.5 § 2 改为字段级全景图 + 新增 § 10 管道数据类型参考）
-**适用版本**: v1.10.5+
+**最近更新**: 2026-05-08（v1.10.7 baseline 机制注记 + § 1a/§ 3/§ 6 delta 路径标注为已删除）
+**适用版本**: v1.10.7+
 **范围**: 主回复路径（StreamingCard）；**不覆盖**独立卡片（`feishu_send_card` tool）、form 交互、权限/问答卡片
+
+> ⚠️ **本文档与代码版本对应说明**：
+> - § 1a / § 3 中提到的 `message.part.delta` 累积路径已在 v1.10.5 删除（PR #74），主回复仅依赖 `message.part.updated` 全量快照。
+> - v1.10.7 新增 baseline 机制：`pollForResponse` 之前抓 baseline 快照，轮询时跳过与 baseline 相同的旧 turn 回复，避免复用 session 时把上一轮文本误当本轮输出。详见 `src/handler/CLAUDE.md` chat.ts 章节。
 
 ---
 

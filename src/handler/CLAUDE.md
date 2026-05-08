@@ -22,10 +22,12 @@
 ## 文件职责
 
 **chat.ts** — 核心对话处理器
-- `handleChat()` 完整走完一条飞书消息：绑定 session → 构造 prompt → `promptAsync()` 异步发送 → 轮询等待输出稳定 → 写回飞书
+- `handleChat()` 完整走完一条飞书消息：绑定 session → 捕获 baseline → 构造 prompt → `promptAsync()` 异步发送 → 轮询等待输出稳定 → 写回飞书
 - 启动 StreamingCard（CardKit 不可用时降级为纯文本占位），通过 action-bus 订阅 text-updated / tool-state-changed / permission / question 事件实时更新卡片
 - 轮询期间每轮检查 SSE 缓存错误，检测到 `SessionErrorDetected` 立即终止
 - catch 块是 `classify()` 的**唯一调用点**（FR-011）：通过 `matchPluginError` exhaustive handler 分发到具体错误处理路径
+
+**baseline 机制（v1.10.7 引入）**：`promptAsync` 之前抓一张 `extractLastAssistantSnapshot` 作为 baseline，传给 `pollForResponse`。轮询过程中若 snapshot 与 baseline 完全相同（旧 turn 的回复未变），跳过本轮不累计 `sameCount`。这避免了"复用 session + 新 turn 慢"场景下 stable 检查在第一次轮询就被旧文本满足，把上一轮回复误当作本轮输出返回。捕获时打 `[feishu] baseline captured` 日志，含 `hasBaseline` / `textLen`，用于事后验证修复是否生效。
 
 **event.ts** — SSE 事件分发与状态缓存
 - `handleEvent()` 接收 OpenCode 事件，按类型分发：`message.part.updated` 更新占位消息或卡片，`permission.asked` / `question.asked` / `session.idle` 转发到 action-bus
