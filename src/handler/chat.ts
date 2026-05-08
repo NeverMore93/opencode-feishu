@@ -543,6 +543,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       sessionId: session.id,
       hasBaseline: baseline.text.length > 0 || baseline.reasoning.length > 0,
       textLen: baseline.text.length,
+      reasoningLen: baseline.reasoning.length,
     })
 
     await client.session.promptAsync({
