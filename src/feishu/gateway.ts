@@ -296,7 +296,24 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
           textPreview: text.slice(0, 80),
         })
 
-        await onMessage(ctx)
+        // 飞书 WebSocket 回调需要尽快返回 ACK；AI 处理可能耗时，放到后台避免触发重投。
+        void (async () => {
+          await onMessage(ctx)
+        })().catch((err) => {
+          log("error", "消息处理错误", {
+            error: err instanceof Error ? err.message : String(err),
+          })
+          if (fallbackShouldReply && fallbackChatId) {
+            larkClient.im.message.create({
+              data: {
+                receive_id: fallbackChatId,
+                msg_type: "text",
+                content: JSON.stringify({ text: "⚠️ 消息处理异常，请重试" }),
+              },
+              params: { receive_id_type: "chat_id" },
+            }).catch(() => {})
+          }
+        })
       } catch (err) {
         log("error", "消息处理错误", {
           error: err instanceof Error ? err.message : String(err),
