@@ -8,6 +8,7 @@ import { cleanMarkdown, truncateMarkdown } from "./markdown.js"
 export type { DetailPhaseSnapshot, DetailPhaseStatus }
 
 export const STATUS_ELEMENT_ID = "reply_status"
+export const SESSION_ELEMENT_ID = "reply_session"
 export const REPLY_ELEMENT_ID = "reply_text"
 export const DETAILS_ELEMENT_ID = "reply_details"
 export const DETAILS_CONTENT_ELEMENT_ID = "reply_details_content"
@@ -39,6 +40,7 @@ export interface ReplyCardAction {
 
 export interface ReplyCardView {
   runId: string
+  sessionId?: string
   title: string
   compactStatus: string
   replyText: string
@@ -174,6 +176,7 @@ export function buildDetailsMarkdown(phases: Iterable<DetailPhaseSnapshot>): str
 
 export function createReplyCardView(params: {
   runId: string
+  sessionId?: string
   title: string
   state: ReplyRunState
   replyText?: string
@@ -189,6 +192,7 @@ export function createReplyCardView(params: {
   const terminalState = params.terminalState ?? toTerminalState(params.state)
   return {
     runId: params.runId,
+    sessionId: params.sessionId,
     title,
     compactStatus: buildCompactStatus(params.state),
     replyText,
@@ -206,8 +210,12 @@ export function buildReplyCardSchema(view: ReplyCardView): CardKitSchema {
   // body 区只剩 status（plugin 自身状态）+ reply（agent 文本原样）+ details + actions
   const elements: Array<Record<string, unknown>> = [
     buildMarkdownElement(STATUS_ELEMENT_ID, buildStatusMarkdown(view.compactStatus)),
-    buildMarkdownElement(REPLY_ELEMENT_ID, buildReplyMarkdown(view.replyText)),
   ]
+  const sessionMarkdown = buildSessionMarkdown(view.sessionId)
+  if (sessionMarkdown) {
+    elements.push(buildMarkdownElement(SESSION_ELEMENT_ID, sessionMarkdown))
+  }
+  elements.push(buildMarkdownElement(REPLY_ELEMENT_ID, buildReplyMarkdown(view.replyText)))
 
   const detailsElement = buildDetailsElement(view.detailsMarkdown)
   if (detailsElement) elements.push(detailsElement)
@@ -235,6 +243,12 @@ export function buildReplyCardSchema(view: ReplyCardView): CardKitSchema {
 
 export function buildStatusMarkdown(status: string): string {
   return `**状态**\n${status.trim()}`
+}
+
+export function buildSessionMarkdown(sessionId: string | undefined): string | undefined {
+  const normalized = (sessionId ?? "").trim()
+  if (!normalized) return undefined
+  return `**会话ID**\n\`${normalized}\``
 }
 
 // agent 文本原样转 markdown element 内容；空时显示 plugin 占位（避免 plugin 编造 agent 内容）。
@@ -291,8 +305,9 @@ export function buildSimpleFallbackText(view: ReplyCardView): string {
   const sections = [
     `【${view.title.trim() || DEFAULT_TITLE}】`,
     `状态：${view.compactStatus}`,
+    view.sessionId ? `会话ID：${view.sessionId}` : "",
     normalizeBlockMarkdown(view.replyText) || EMPTY_REPLY_PLACEHOLDER,
-  ]
+  ].filter(Boolean)
 
   const details = normalizeBlockMarkdown(view.detailsMarkdown ?? "")
   if (details) {

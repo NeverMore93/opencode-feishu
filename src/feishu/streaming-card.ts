@@ -440,6 +440,7 @@ export class StreamingCard {
     const detailsMarkdown = buildDetailsMarkdown(this.detailPhases.values())
     return createReplyCardView({
       runId: this.meta.runId,
+      sessionId: this.meta.sessionId,
       title: this.meta.title ?? "AI 回复",
       state: this.runState,
       replyText: this.replyText,
