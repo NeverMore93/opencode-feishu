@@ -27,7 +27,6 @@ export interface ActiveReplyRun {
   endedAt?: string
   cardMessageId?: string
   cardId?: string
-  requestMessageIds: string[]
   abortRequestedAt?: string
   abortSource?: "card" | "message" | "system"
   /** 进入 aborting 前的非终态；abort 失败时用于恢复，避免硬重置到 running。 */
@@ -69,7 +68,6 @@ export function createReplyRun(params: {
     chatType: params.chatType,
     state: "starting",
     startedAt: new Date().toISOString(),
-    requestMessageIds: [],
     controller: new AbortController(),
   }
 
@@ -84,16 +82,6 @@ export function attachRunCard(runId: string, card: { cardId?: string; cardMessag
   if (card.cardId) run.cardId = card.cardId
   if (card.cardMessageId) run.cardMessageId = card.cardMessageId
   cacheRun(run)
-  return run
-}
-
-export function addRunRequestMessageId(runId: string, messageId: string): ActiveReplyRun | undefined {
-  const run = getRunByRunId(runId)
-  if (!run) return undefined
-  if (messageId && !run.requestMessageIds.includes(messageId)) {
-    run.requestMessageIds.push(messageId)
-    cacheRun(run)
-  }
   return run
 }
 

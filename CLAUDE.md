@@ -1,4 +1,4 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -76,6 +76,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - 入群自动摄入历史消息
 - CardKit 2.0 流式卡片：AI 回复实时显示文本（markdown 渲染）和工具调用进度
 - 交互式卡片：权限审批和问答通过按钮完成（card.action.trigger WebSocket 回调）
+- **飞书 form 双向交互**（spec 031）：agent 通过 `feishu_send_card` 发送 form 卡片收集结构化输入；`feishu_request_form` 阻塞型 tool 三路 race 就地获取用户提交结果
 - 事件总线（action-bus）：per-session 事件订阅/发布，驱动流式卡片和交互卡片
 - Zod 配置验证：启动时结构化验证 feishu.json，拼写/类型错误立即报出
 - 通过插件 `event` 钩子接收 SSE 事件（message.part.updated、message.part.delta、message.updated、session.error、permission.asked、question.asked、session.idle）
@@ -87,12 +88,11 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - **所有文档包括 .specify 目录下尽量用中文编写**
 - **任何变更先改版本号** - 推荐使用 `npm run release` 自动完成版本更新、commit、tag 和 push，然后通过 PR 合并到 main。
 
-### Prompt/Skill 约定
+### Prompt 约定
 - 插件尽量保持透传，只负责渠道事实、展示控制和交互承载，不主动塑形 agent 的内容性输入输出。
-- `skills/<name>/prompt.md` 仅作为插件运行时 prompt 源文件，内容必须限制为最小事实、工具契约、渲染/回调约束和显式 non-goals。
-- `skills/<name>/SKILL.md` 是正式技能文档，用于发现、维护、评审和演进，**不得**整份注入飞书会话的 system prompt。
+- `prompts/<name>/prompt.md` 仅作为插件运行时 prompt 源文件，内容必须限制为最小事实、工具契约、渲染/回调约束和显式 non-goals。
 - `prompt.md` **不得**写入"何时发卡""标题/摘要/结论如何组织""按钮如何措辞""发送前自检"这类输出策略指令。
-- 当前 skills：`skills/feishu-card-interaction/`（含 `prompt.md` 运行时 system prompt 与 `SKILL.md` 技能文档）。
+- 当前 prompts：`prompts/feishu-card-interaction/`（含 `prompt.md` 运行时 system prompt）。
 
 详细项目约定参见：`.specify/memory/constitution.md`
 
@@ -152,6 +152,8 @@ FEISHU_DEBUG=1 opencode 2>feishu-debug.log            # 重定向到文件
 
 ## 架构设计
 
+> **运行时数据流视图**（一条飞书消息 → agent 输出 → 卡片渲染的 6 stage 完整链路）见独立架构文档 [`./CLAUDE.reply-rendering.md`](./CLAUDE.reply-rendering.md)。本节是**静态组件视图**（哪些文件、谁的职责）。
+
 ### 插件架构
 ```
 OpenCode 加载插件 → src/index.ts (FeishuPlugin)
@@ -170,6 +172,7 @@ OpenCode 加载插件 → src/index.ts (FeishuPlugin)
         ├── im.chat.member.bot.added_v1 → ingestGroupHistory()
         └── card.action.trigger → handleCardAction() → v2Client.permission/question.reply()
                                                         (v2Client = OpenCode v2 SDK client)
+            └── form_submit → resolvePendingForm(P3) → fallback syntheticCtx + send_message(P1)
     event 钩子 → handleEvent()
         ├── message.part.updated → 全量快照：更新占位消息 + emit text-updated/tool-state-changed
         ├── message.part.delta → 增量 delta：拼接文本增量到 pendingBySession
@@ -194,19 +197,21 @@ src/
     error-recovery.ts   # 模型错误自动恢复（消费已分类的 PluginError）
     session-queue.ts    # per-sessionKey FIFO 串行队列
     action-bus.ts       # per-session 事件订阅/发布
-    interactive.ts      # 权限/问答交互卡片 + 按钮回调路由
+    interactive.ts      # 权限/问答交互卡片 + 按钮回调路由 + form_submit 信封重写
+    pending-forms.ts    # 阻塞型 feishu_request_form 全局注册表（spec 031）
     reply-run-registry.ts # run 生命周期状态机 + abort 支持
   feishu/               # 飞书渠道适配层（不碰会话编排逻辑）
     gateway.ts cardkit.ts streaming-card.ts result-card-view.ts sender.ts
     content-extractor.ts resource.ts quote.ts user-name.ts markdown.ts
     history.ts session-chat-map.ts dedup.ts group-filter.ts
   tools/
-    send-card.ts        # feishu_send_card tool + 统一 DSL→CardKit JSON 翻译
+    send-card.ts        # feishu_send_card tool + 统一 DSL→CardKit JSON 翻译（含 form section）
+    request-form.ts     # feishu_request_form 阻塞型 tool + 三路 race（spec 031）
   utils/
     ttl-map.ts          # 带 TTL 自动清理的 Map
-skills/
+prompts/
   feishu-card-interaction/
-    prompt.md SKILL.md
+    prompt.md
 ```
 
 每个子目录的 `CLAUDE.md` 包含该目录下每个文件的关键行为描述。
@@ -216,6 +221,12 @@ skills/
 **`buildCardFromDSL`**（tools/send-card.ts ↔ handler/interactive.ts）——唯一真跨目录契约：
 - 同时被 agent tool 和权限/问答交互卡片复用
 - `ButtonInput.actionPayload` 有值时直接用作按钮 value（权限/问答），无值时构造 send_message action
+- spec 031 新增 form section：`translateFormSection` 翻译为飞书 form 容器 schema，submit button 命名 `btn_submit_<formName>` 是 gateway 反查 formName 的三方契约
+
+**`resolvePendingForm`**（handler/pending-forms.ts ↔ feishu/gateway.ts）——spec 031 新增跨目录契约：
+- pending-forms.ts 维护全局注册表（formName → resolver）
+- gateway.ts form_submit 分支调用 `resolvePendingForm` 判定 P3 命中 / P1 fallback
+- `btn_submit_<formName>` 命名约定同时约束 send-card.ts（构造端）和 gateway.ts（解析端）
 
 handler 内部契约（`mirrorTextToMessage`、`expectedMessageId` 首条锁）详见 `src/handler/CLAUDE.md`。
 
@@ -237,7 +248,6 @@ handler 内部契约（`mirrorTextToMessage`、`expectedMessageId` 首条锁）�
 必需字段：`appId`, `appSecret`
 可选字段（**source of truth: `src/types.ts` 的 `FeishuConfigSchema`**）：
 - `timeout`：对话轮询总超时（毫秒）；默认不设置固定超时。仅在显式配置时，超时后返回 `⚠️ 响应超时`
-- `thinkingDelay`：默认 `2500ms`
 - `logLevel`：默认 `"info"`，控制 Lark SDK 日志级别
 - `maxHistoryMessages`：默认 `200`，最大 `500`；飞书接口按每页 `50` 条分页拉取
 - `pollInterval`：默认 `1000ms`
@@ -246,7 +256,7 @@ handler 内部契约（`mirrorTextToMessage`、`expectedMessageId` 首条锁）�
 - `maxResourceSize`：默认 `500MB`，最大 `500MB`
 - `directory`：默认使用 OpenCode 当前工作目录（`ctx.directory`）；若 OpenCode 未提供则为空字符串；支持 `~` 和 `${ENV_VAR}` 展开
 - `nudge.enabled`：默认 `false`
-- `nudge.message`：默认"上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。"
+- `nudge.message`：默认来自 OpenCode `compaction.ts:340` 的 autocontinue prompt（英文，"if/or" 形式给予 agent 选择权）
 - `nudge.intervalSeconds`：默认 `30`
 - `nudge.maxIterations`：默认 `3`
 - `nudge` 真实行为：仅在 `session.idle` 且最后一条 assistant message 以 `tool` part 结尾时，向 OpenCode 发送 `synthetic prompt`；不会直接向飞书用户新增一条可见消息
@@ -260,6 +270,8 @@ handler 内部契约（`mirrorTextToMessage`、`expectedMessageId` 首条锁）�
 | 群聊 + 未被 @提及 | 是 | **是** | **否** |
 | Bot 加入群（历史摄入） | 是 | **是** | **否** |
 | session.idle 催促 | 是（synthetic prompt） | 否 | 否（仅驱动 OpenCode 继续执行） |
+| form_submit（P1 路径） | 是（syntheticCtx） | 否 | 是（toast "表单已提交"） |
+| form_submit（P3 路径） | 否（resolver 直接返回） | 否 | 是（toast "表单已提交"） |
 
 **群聊行为关键点**（实现细节见 `src/feishu/CLAUDE.md`）：
 - @提及检测依赖 bot 的 `open_id`（启动时通过 `/open-apis/bot/v3/info` 获取，失败直接阻止插件启动）
@@ -296,3 +308,5 @@ handler 内部契约（`mirrorTextToMessage`、`expectedMessageId` 首条锁）�
 - **消息去重**：按 `dedupTtl` 窗口处理，默认 10 分钟
 - **插件生命周期**：由 OpenCode 管理，无独立进程
 - **会话中毒恢复**：检测到结构性错误（如不兼容的 file part、tool schema）时调用 `client.session.create()` 开一条**全新空白** session（**不是 fork**，**不保留历史对话**）；旧 session 在 OpenCode server 上仍存在但插件不再引用。用户需重新发送消息，上下文丢失是此策略的有意代价——fork 会复制中毒历史导致死循环。
+- **form 容器仅在显式 form section 出现**：`buildCardFromDSL` 不会自动为普通 actions/buttons 注入 form 容器；form 容器仅在 agent 显式声明 `{ type: "form", ... }` 时构建（spec 031 FR-004）。
+- **form_submit 三路优先级**：gateway 收到 form_submit 回调时，先查 pendingForms 注册表（P3 阻塞型 tool），命中则 resolver 直接返回；未命中则 fallback 到 syntheticCtx + send_message（P1 非阻塞路径）。

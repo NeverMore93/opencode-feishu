@@ -100,53 +100,26 @@ export class CardKitClient {
     content: string,
     sequence: number,
   ): Promise<void> {
-    // updateElement 在流式卡片生命周期里调用最频繁；单次瞬时失败立即 degraded 过于脆弱。
-    // 使用轻量 retry（最多 1 次重试，500ms 间隔）吸收瞬时网络/rate-limit 抖动。
-    const MAX_ATTEMPTS = 2
-    const RETRY_DELAY_MS = 500
-    let lastErr: unknown
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        const res = await this.larkClient.cardkit.v1.cardElement.content({
-          data: {
-            content,
-            sequence,
-          },
-          path: {
-            card_id: cardId,
-            element_id: elementId,
-          },
-        })
-
-        if (res?.code !== 0) {
-          lastErr = new Error(`CardKit updateElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
-          this.log?.("warn", `CardKit updateElement 尝试 ${attempt}/${MAX_ATTEMPTS} 业务失败`, {
-            cardId,
-            elementId,
-            code: res?.code,
-            msg: res?.msg,
-          })
-        } else {
-          return
-        }
-      } catch (err) {
-        lastErr = err
-        this.log?.("warn", `CardKit updateElement 尝试 ${attempt}/${MAX_ATTEMPTS} transport 异常`, {
-          cardId,
-          elementId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-      if (attempt < MAX_ATTEMPTS) {
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
-      }
-    }
-    this.log?.("error", "CardKit updateElement 重试耗尽", {
-      cardId,
-      elementId,
-      error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+    const res = await this.larkClient.cardkit.v1.cardElement.content({
+      data: {
+        content,
+        sequence,
+      },
+      path: {
+        card_id: cardId,
+        element_id: elementId,
+      },
     })
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+
+    if (res?.code !== 0) {
+      this.log?.("error", "CardKit updateElement 失败", {
+        cardId,
+        elementId,
+        code: res?.code,
+        msg: res?.msg,
+      })
+      throw new Error(`CardKit updateElement 失败: ${res?.msg ?? "unknown"} (code: ${res?.code})`)
+    }
   }
 
   /**

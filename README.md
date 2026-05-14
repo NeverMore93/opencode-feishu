@@ -67,7 +67,6 @@ opencode
 | `appId` | string | 是 | — | 飞书应用 App ID |
 | `appSecret` | string | 是 | — | 飞书应用 App Secret |
 | `timeout` | number | 否 | `未设置` | 对话轮询总超时（毫秒）；未配置时不设固定超时，持续等待直到响应稳定、检测到 SSE 错误或请求被中断 |
-| `thinkingDelay` | number | 否 | `2500` | 发送"正在思考…"前的延迟（毫秒），设为 0 禁用 |
 | `logLevel` | string | 否 | `"info"` | 日志级别：fatal/error/warn/info/debug/trace |
 | `maxHistoryMessages` | number | 否 | `200` | 入群时最多摄入的历史消息条数（飞书接口按 50/页分页拉取） |
 | `pollInterval` | number | 否 | `1000` | 轮询 AI 响应的间隔（毫秒） |
@@ -98,7 +97,11 @@ opencode
 - **消息去重** — 可配置 TTL（默认 10 分钟）
 - **Zod 配置验证** — 启动时结构化验证 feishu.json，拼写/类型错误立即报出
 
-## 消息行为
+## 产品行为
+
+完整的产品行为契约（消息流程、责任分界、错误体验、不变量、配置如何影响行为）见 **[BEHAVIOR.md](./BEHAVIOR.md)**。
+
+简表速查：
 
 | 场景 | 发送到 OpenCode | AI 回复 | 飞书回复 |
 |------|:---:|:---:|:---:|
@@ -107,18 +110,7 @@ opencode
 | 群聊未 @bot | 是 | 否（静默积累上下文） | 否 |
 | bot 入群 | 历史消息 | 否 | 否 |
 
-## 消息类型支持
-
-| 类型 | 处理方式 | AI 看到 |
-|------|---------|--------|
-| 文本 | 直接提取 | 纯文本（群聊带 `[用户名]:` 前缀） |
-| 图片 | 下载 → base64 | `{ type: "file", mime, url }` |
-| 富文本 | 文本 + 内嵌图片分别提取 | 交错的 text/file parts |
-| 文件 | 下载 → base64 | `{ type: "file", filename, url }` |
-| 音频 | 下载 → base64 | `{ type: "file", mime: "audio/opus" }` |
-| 卡片 | 递归提取 markdown/table/button | `[卡片消息]\n内容...` |
-| 视频 | 不下载 | `[视频消息]` |
-| 其他 | 占位文本 | `[不支持的消息类型: xxx]` |
+支持的消息类型：text / image / 富文本 (post) / file / audio / 卡片 / quote。详见 BEHAVIOR.md §4.2。
 
 ## 开发
 

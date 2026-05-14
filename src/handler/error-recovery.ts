@@ -103,7 +103,6 @@ export async function tryModelRecovery(params: {
   readonly sessionKey: string
   readonly client: OpencodeClient
   readonly directory?: string
-  readonly requestMessageId: string
   readonly parts: readonly PromptPart[]
   readonly timeout?: number
   readonly pollInterval: number
@@ -115,7 +114,6 @@ export async function tryModelRecovery(params: {
 }): Promise<RecoveryResult> {
   const {
     pluginError, sessionId, sessionKey, client, directory,
-    requestMessageId,
     parts, timeout, pollInterval, stablePolls, query, signal,
     log, poll,
   } = params
@@ -163,8 +161,7 @@ export async function tryModelRecovery(params: {
     await client.session.promptAsync({
       path: { id: sessionId },
       query,
-      // 恢复尝试也显式绑定一个 user messageID，便于上层只读取这次尝试的实际模型。
-      body: { parts: [...parts], model: modelOverride, messageID: requestMessageId },
+      body: { parts: [...parts], model: modelOverride },
     })
 
     const finalText = await poll(client, sessionId, {

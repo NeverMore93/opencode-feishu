@@ -84,10 +84,9 @@ src/
     send-card.ts        # feishu_send_card tool + 统一 DSL→CardKit JSON 翻译
   utils/
     ttl-map.ts          # 带 TTL 自动清理的 Map
-skills/
+prompts/
   feishu-card-interaction/
     prompt.md           # 运行时 prompt（注入飞书会话 system prompt）
-    SKILL.md            # 技能文档（不注入 system prompt）
 ```
 
 ## 关键跨文件契约（修改任一侧必须同步另一侧）
@@ -180,6 +179,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 | 群聊 + @bot | 是 | 是 |
 | 群聊 + 未@bot | 是（noReply） | 否 |
 | Bot 入群（历史摄入） | 是（noReply） | 否 |
+
+完整产品行为契约（用户旅程、错误体验、责任分界、不变量）见 [BEHAVIOR.md](./BEHAVIOR.md)。
 
 ---
 

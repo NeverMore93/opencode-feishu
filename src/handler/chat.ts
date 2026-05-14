@@ -11,7 +11,7 @@
  */
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
-import { randomUUID } from "node:crypto"
+import type { OpencodeClient as V2OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
@@ -31,7 +31,6 @@ import type { CardKitClient } from "../feishu/cardkit.js"
 import { StreamingCard } from "../feishu/streaming-card.js"
 import { handlePermissionRequested, handleQuestionRequested, type InteractiveDeps } from "./interactive.js"
 import {
-  addRunRequestMessageId,
   attachRunCard,
   completeReplyRun,
   createReplyRun,
@@ -98,38 +97,87 @@ function traceLangfuseUser(
 }
 
 /**
- * 为当前 prompt 生成稳定的 user messageID。
- *
- * 后续回读实际模型时，只认和这个 ID 关联出来的 assistant message，
- * 避免把上一轮对话的模型误展示到当前卡片。
- */
-function createPromptMessageId(): string {
-  return randomUUID()
-}
-
-/**
- * 从当前请求关联的 assistant message 读取实际执行模型。
- *
- * 这里优先信任运行结果本身的 `providerID/modelID`，
- * 而不是配置里的默认模型，避免自动恢复或局部 override 后显示错误。
+ * 从 session 最后一条 assistant message 读取实际执行模型。
  */
 async function fetchActualModel(
   client: OpencodeClient,
   sessionId: string,
-  requestMessageIds: readonly string[],
   log: LogFn,
   query?: { directory?: string },
 ): Promise<string | undefined> {
   try {
     const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
-    return extractAssistantModelForRequests(messages ?? [], requestMessageIds)
+    return extractAssistantModel(messages ?? [])
   } catch (err) {
-    // 模型信息只影响卡片辅助展示；读取失败时回退为不展示模型。
-    log("error", "读取本次 assistant 实际模型失败", {
+    log("error", "读取 assistant 实际模型失败", {
       sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
     return undefined
+  }
+}
+
+/**
+ * 扫描 session 历史，定位并删除中毒消息。
+ *
+ * 根据 poison rule 决定扫描策略：
+ * - file-part-media-type：找含非图片 file part 的消息
+ * - localshell-schema / zoderror-localshell：找含 local_shell tool part 的消息
+ *
+ * @returns true = 成功删除，调用方应重发 prompt；false = 未找到或删除失败
+ */
+async function findAndCleanPoisonedMessage(params: {
+  v2Client: V2OpencodeClient
+  sessionId: string
+  rule: string
+  directory?: string
+  log: LogFn
+}): Promise<boolean> {
+  const { v2Client, sessionId, rule, directory, log } = params
+
+  try {
+    const res = await v2Client.session.messages({ sessionID: sessionId, directory })
+    const messages = res.data as Array<{ info: { id: string }; parts: Array<Record<string, unknown>> }> | undefined
+    if (!messages?.length) return false
+
+    let targetMessageId: string | undefined
+
+    // 倒序扫描：中毒消息通常是最近一条，从末尾找更快
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      for (const part of msg.parts) {
+        if (rule === "poison/file-part-media-type" && part.type === "file") {
+          const mime = (part.mime as string) ?? ""
+          if (mime && !mime.startsWith("image/")) {
+            targetMessageId = msg.info.id
+            break
+          }
+        } else if (
+          (rule === "poison/localshell-schema" || rule === "poison/zoderror-localshell")
+          && part.type === "tool"
+          && (part.tool as string) === "local_shell"
+        ) {
+          targetMessageId = msg.info.id
+          break
+        }
+      }
+      if (targetMessageId) break
+    }
+
+    if (!targetMessageId) {
+      log("warn", "未找到可清理的中毒消息", { sessionId, rule })
+      return false
+    }
+
+    await v2Client.session.deleteMessage({ sessionID: sessionId, messageID: targetMessageId, directory })
+    log("info", "已删除中毒消息", { sessionId, rule, deletedMessageId: targetMessageId })
+    return true
+  } catch (err) {
+    log("error", "清理中毒消息失败", {
+      sessionId, rule,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return false
   }
 }
 
@@ -142,6 +190,8 @@ export interface ChatDeps {
   directory: string
   cardkit?: CardKitClient
   interactiveDeps?: InteractiveDeps
+  /** v2 client（扁平参数），用于 v1 不支持的方法（如 deleteMessage）。 */
+  v2Client?: V2OpencodeClient
 }
 
 interface AssistantSnapshot {
@@ -204,7 +254,7 @@ async function finalizeReply(params: FinalizeReplyParams): Promise<void> {
     runId: "fallback",
     title,
     state,
-    conclusion: resolvedConclusion,
+    replyText: resolvedConclusion,
     detailsMarkdown,
     fallbackMode: "simple",
   })
@@ -292,7 +342,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   }
 
   const timeout = config.timeout
-  const thinkingDelay = config.thinkingDelay
   const pollInterval = config.pollInterval
   const stablePolls = config.stablePolls
   const run = createReplyRun({
@@ -302,15 +351,12 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     chatType,
   })
   // 当前用户可见这一轮可能会产生多次 prompt（原始尝试 + 自动恢复），统一记录它们的 messageID。
-  const requestMessageIds: string[] = []
   const detailPhases = new Map<string, DetailPhaseSnapshot>()
   let latestSnapshot: AssistantSnapshot = { text: "", reasoning: "" }
   let timedOut = false
   let observedRunState: ReplyRunState = run.state
 
   let placeholderId = ""
-  // `done` 用于避免 thinking timer 在主流程已结束后再异步发出占位消息。
-  let done = false
   let activeSessionId = session.id
   let streamingCard: StreamingCard | undefined
 
@@ -348,46 +394,32 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     }
   }
 
-  // 如果没有流式卡片，则在 thinkingDelay 到达后发一条传统“正在思考…”消息。
-  const timer =
-    !streamingCard && thinkingDelay > 0
-      ? setTimeout(async () => {
-          if (done) return
-          try {
-            const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考…", log)
-            // 发送是异步的；如果主流程已经结束，要把这条“迟到”的占位消息删掉。
-            if (done) {
-              if (res.ok && res.messageId) {
-                await sender.deleteMessage(feishuClient, res.messageId, log)
-              }
-              return
-            }
-            if (!res.ok) {
-              log("error", "发送占位消息失败", {
-                chatId,
-                sessionId: activeSessionId,
-                error: res.error ?? "unknown",
-              })
-              return
-            }
-            if (res.messageId) {
-              placeholderId = res.messageId
-              attachRunCard(run.runId, { cardMessageId: placeholderId })
-              // 只有传统占位消息路径需要注册 pending，让 event.ts 直接更新飞书消息内容。
-              registerPending(activeSessionId, {
-                placeholderId,
-                feishuClient,
-                mirrorTextToMessage: true,
-              })
-            }
-          } catch (err) {
-            log("error", "发送占位消息失败", {
-              chatId,
-              error: err instanceof Error ? err.message : String(err),
-            })
-          }
-        }, thinkingDelay)
-      : null
+  // CardKit 不可用时立即发一条纯文本占位，让 event.ts 通过 mirrorTextToMessage 持续更新。
+  if (!streamingCard) {
+    try {
+      const res = await sender.sendTextMessage(feishuClient, chatId, "正在思考...", log)
+      if (res.ok && res.messageId) {
+        placeholderId = res.messageId
+        attachRunCard(run.runId, { cardMessageId: placeholderId })
+        registerPending(activeSessionId, {
+          placeholderId,
+          feishuClient,
+          mirrorTextToMessage: true,
+        })
+      } else {
+        log("error", "发送占位消息失败", {
+          chatId,
+          sessionId: activeSessionId,
+          error: res.error ?? "unknown",
+        })
+      }
+    } catch (err) {
+      log("error", "发送占位消息失败", {
+        chatId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   // 订阅 action-bus：详情/工具更新驱动结构化结果卡，权限/问答事件驱动独立交互卡片。
   let cardUnsub: (() => void) | undefined
@@ -488,10 +520,10 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       stablePolls: number
       query?: { directory: string }
       signal?: AbortSignal
+      baseline?: AssistantSnapshot
     },
   ) => pollForResponse(currentClient, currentSessionId, {
     ...pollOptions,
-    requestMessageIds,
     onSnapshot: handleSnapshot,
     onTick: syncObservedRunState,
     onTimedOut: () => {
@@ -502,14 +534,25 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   try {
     // 清除前次遗留的 session error 缓存，避免 pollForResponse 误检测旧错误。
     clearSessionError(session.id)
-    const requestMessageId = createPromptMessageId()
-    requestMessageIds.push(requestMessageId)
-    addRunRequestMessageId(run.runId, requestMessageId)
+
+    // 捕获 baseline：promptAsync 前的最后一条 assistant 快照。
+    // 复用 session 时，轮询必须忽略与 baseline 相同的旧 turn 快照。
+    const { data: baselineMessages } = await client.session.messages({ path: { id: session.id }, query }).catch(() => ({ data: undefined }))
+    const baseline = extractLastAssistantSnapshot(baselineMessages ?? [])
+    log("info", "baseline captured", {
+      sessionKey,
+      sessionId: session.id,
+      // fetchSuccess=false 区分"fetch 失败"和"session 真的为空"——两者都会 hasBaseline=false 但语义不同。
+      fetchSuccess: baselineMessages !== undefined,
+      hasBaseline: baseline.text.length > 0 || baseline.reasoning.length > 0,
+      textLen: baseline.text.length,
+      reasoningLen: baseline.reasoning.length,
+    })
 
     await client.session.promptAsync({
       path: { id: session.id },
       query,
-      body: { ...baseBody, messageID: requestMessageId },
+      body: baseBody,
     })
 
     observedRunState = "running"
@@ -523,6 +566,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       stablePolls,
       query,
       signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
+      baseline,
     })
 
     log("info", "模型响应完成", {
@@ -534,7 +578,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     // prompt 成功：清空该 sessionKey 的自动恢复计数。
     clearRetryAttempts(sessionKey)
 
-    const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+    const actualModel = await fetchActualModel(client, session.id, log, query)
     const terminalState = timedOut ? "timed_out" : "completed"
     completeReplyRun(run.runId, terminalState)
     observedRunState = terminalState
@@ -561,7 +605,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       if (streamingCard) {
         await streamingCard.setRunState("aborted", "aborted")
       }
-      const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+      const actualModel = await fetchActualModel(client, session.id, log, query)
       await finalizeReply({
         streamingCard,
         feishuClient,
@@ -587,35 +631,82 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
 
     await matchPluginError(pluginError, {
       SessionPoisoned: async (e) => {
-        log("error", "检测到 session 历史数据中毒，创建新 session", {
+        log("error", "检测到 session 历史数据中毒", {
           sessionKey, oldSessionId: session.id, rule: e.rule,
         })
-        invalidateSession(sessionKey)
-        completeReplyRun(run.runId, "failed")
-        if (streamingCard) {
-          await streamingCard.setRunState("failed", "failed")
+
+        // L1: 尝试精准删除中毒消息后在同一 session 上重发 prompt。
+        let recovered = false
+        if (deps.v2Client) {
+          const cleaned = await findAndCleanPoisonedMessage({
+            v2Client: deps.v2Client,
+            sessionId: session.id,
+            rule: e.rule,
+            directory,
+            log,
+          })
+
+          if (cleaned) {
+            timedOut = false
+            clearSessionError(session.id)
+
+            try {
+              await client.session.promptAsync({
+                path: { id: session.id },
+                query,
+                body: baseBody,
+              })
+
+              const finalText = await poll(client, session.id, {
+                timeout, pollInterval, stablePolls, query,
+                signal: mergeAbortSignals([signal, getRunAbortSignal(run.runId)]),
+              })
+
+              const actualModel = await fetchActualModel(client, session.id, log, query)
+              const terminalState = timedOut ? "timed_out" : "completed"
+              completeReplyRun(run.runId, terminalState)
+              if (streamingCard) {
+                await streamingCard.setRunState(terminalState, terminalState)
+              }
+              await finalizeReply({
+                streamingCard, feishuClient, chatId, placeholderId, log,
+                actualModel, title: replyTitle, state: terminalState,
+                conclusion: finalText || latestSnapshot.text || (timedOut ? "⚠️ 响应超时" : undefined),
+                detailsPhases: detailPhases.values(),
+              })
+              recovered = true
+              log("info", "session 中毒恢复成功（已删除不兼容消息）", {
+                sessionKey, sessionId: session.id, rule: e.rule,
+              })
+            } catch (recoveryErr) {
+              log("error", "删除中毒消息后重发 prompt 失败，降级到新建 session", {
+                sessionKey, rule: e.rule,
+                error: recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr),
+              })
+            }
+          }
         }
-        await finalizeReply({
-          streamingCard,
-          feishuClient,
-          chatId,
-          placeholderId,
-          log,
-          title: replyTitle,
-          state: "failed",
-          conclusion: "⚠️ 会话历史包含不兼容数据，已自动重置。请重新发送消息。",
-          detailsPhases: detailPhases.values(),
-        })
+
+        // L2: 恢复失败或 v2Client 不可用 — 废弃 session，用户需重发消息。
+        if (!recovered) {
+          invalidateSession(sessionKey)
+          completeReplyRun(run.runId, "failed")
+          if (streamingCard) {
+            await streamingCard.setRunState("failed", "failed")
+          }
+          await finalizeReply({
+            streamingCard, feishuClient, chatId, placeholderId, log,
+            title: replyTitle, state: "failed",
+            conclusion: "⚠️ 会话历史包含不兼容数据，已自动重置。请重新发送消息。",
+            detailsPhases: detailPhases.values(),
+          })
+        }
       },
 
       ModelUnavailable: async (e) => {
         timedOut = false
-        const recoveryRequestMessageId = createPromptMessageId()
-        requestMessageIds.push(recoveryRequestMessageId)
-        addRunRequestMessageId(run.runId, recoveryRequestMessageId)
         const recovery = await tryModelRecovery({
           pluginError: e, sessionId: session.id, sessionKey, client, directory,
-          requestMessageId: recoveryRequestMessageId,
           parts,
           timeout,
           pollInterval,
@@ -627,7 +718,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
         })
 
         if (recovery.recovered) {
-          const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+          const actualModel = await fetchActualModel(client, session.id, log, query)
           const terminalState = timedOut ? "timed_out" : "completed"
           completeReplyRun(run.runId, terminalState)
           if (streamingCard) {
@@ -648,7 +739,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           return
         }
         // 恢复失败：显示原始模型错误。
-        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        const actualModel = await fetchActualModel(client, session.id, log, query)
         completeReplyRun(run.runId, "failed")
         if (streamingCard) {
           await streamingCard.setRunState("failed", "failed")
@@ -713,7 +804,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
           hint: e.hint,
           error: thrownError,
         })
-        const actualModel = await fetchActualModel(client, session.id, requestMessageIds, log, query)
+        const actualModel = await fetchActualModel(client, session.id, log, query)
         completeReplyRun(run.runId, "failed")
         if (streamingCard) {
           await streamingCard.setRunState("failed", "failed")
@@ -733,9 +824,6 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
       },
     })
   } finally {
-    done = true
-    // 无论成功失败，都要把延迟占位计时器、订阅和 pending 状态回收掉。
-    if (timer) clearTimeout(timer)
     if (cardUnsub) cardUnsub()
     unregisterPending(activeSessionId)
   }
@@ -777,11 +865,12 @@ async function buildPromptParts(
 
   if (messageType === "text") {
     let promptText = textContent
+    const messageMeta = senderName ? { open_id: senderId, sender_name: senderName } : undefined
     if (senderName) {
       // 群聊文本消息前面补 `[用户名]:`，帮助模型区分多说话人场景。
       promptText = `[${senderName}]: ${textContent}`
     }
-    return [{ type: "text", text: quotePrefix + promptText }]
+    return [{ type: "text", text: quotePrefix + promptText, metadata: messageMeta }]
   }
 
   // 非文本消息：交给更专门的 extractor 处理资源、富文本和卡片结构。
@@ -789,8 +878,9 @@ async function buildPromptParts(
 
   // 非文本消息如果也有引用或群聊用户名前缀，则在最前面插一个 text part。
   const prefix = [quotePrefix, senderName ? `[${senderName}]:` : ""].filter(Boolean).join("")
+  const messageMeta = senderName ? { open_id: senderId, sender_name: senderName } : undefined
   if (prefix && parts.length > 0) {
-    return [{ type: "text", text: prefix }, ...parts]
+    return [{ type: "text", text: prefix, metadata: messageMeta }, ...parts]
   }
 
   return parts
@@ -809,13 +899,14 @@ async function pollForResponse(
     stablePolls: number
     query?: { directory: string }
     signal?: AbortSignal
-    requestMessageIds?: readonly string[]
+    /** promptAsync 前捕获的 baseline，用于忽略旧 turn 的快照。 */
+    baseline?: AssistantSnapshot
     onSnapshot?: (snapshot: AssistantSnapshot) => void | Promise<void>
     onTick?: () => void | Promise<void>
     onTimedOut?: () => void
   },
 ): Promise<string> {
-  const { timeout, pollInterval, stablePolls, query, signal, requestMessageIds, onSnapshot, onTick, onTimedOut } = opts
+  const { timeout, pollInterval, stablePolls, query, signal, baseline, onSnapshot, onTick, onTimedOut } = opts
   // 轮询开始时间，用于超时判断。
   const start = Date.now()
   // 最近一次看到的 assistant 快照。
@@ -862,7 +953,13 @@ async function pollForResponse(
       }
 
       const { data: messages } = await client.session.messages({ path: { id: sessionId }, query })
-      const snapshot = extractAssistantSnapshotForRequests(messages ?? [], requestMessageIds)
+      const snapshot = extractLastAssistantSnapshot(messages ?? [])
+
+      // 忽略与 baseline 相同的快照（旧 turn 的回复），避免复用 session 时提前收敛。
+      if (baseline && !hasAssistantSnapshotChanged(snapshot, baseline)) {
+        // 快照与 baseline 相同，说明新 turn 尚未产生输出，继续等待。
+        continue
+      }
 
       if (hasAssistantSnapshotChanged(snapshot, lastSnapshot)) {
         // 看到新快照：更新并重置稳定计数。
@@ -890,11 +987,15 @@ async function pollForResponse(
 
     // 再 fetch 一次最终消息列表，尽可能拿到最完整文本。
     const { data: finalMessages } = await client.session.messages({ path: { id: sessionId }, query })
-    const finalSnapshot = extractAssistantSnapshotForRequests(finalMessages ?? [], requestMessageIds)
-    if (hasAssistantSnapshotChanged(finalSnapshot, lastSnapshot) && onSnapshot) {
-      await onSnapshot(finalSnapshot)
+    const finalSnapshot = extractLastAssistantSnapshot(finalMessages ?? [])
+    // 忽略与 baseline 相同的旧 turn 快照，避免返回上一轮的文本。
+    const effectiveSnapshot = (baseline && !hasAssistantSnapshotChanged(finalSnapshot, baseline))
+      ? lastSnapshot
+      : finalSnapshot
+    if (hasAssistantSnapshotChanged(effectiveSnapshot, lastSnapshot) && onSnapshot) {
+      await onSnapshot(effectiveSnapshot)
     }
-    return finalSnapshot.text || lastSnapshot.text
+    return effectiveSnapshot.text || lastSnapshot.text
   } finally {
     unsub()
   }
@@ -1004,69 +1105,32 @@ function extractLastAssistantSnapshot(
   }
 }
 
-function extractAssistantSnapshotForRequests(
-  messages: Array<{
-    info: { role?: string; parentID?: unknown; [key: string]: unknown }
-    parts: Array<{ type?: string; text?: string; [key: string]: unknown }>
-  }>,
-  requestMessageIds?: readonly string[],
-): AssistantSnapshot {
-  if (!requestMessageIds || requestMessageIds.length === 0) {
-    return extractLastAssistantSnapshot(messages)
-  }
-
-  const requestIdSet = new Set(requestMessageIds)
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    const info = message?.info
-    if (info?.role !== "assistant") continue
-    const parentID = typeof info.parentID === "string" ? info.parentID.trim() : ""
-    if (!parentID || !requestIdSet.has(parentID)) continue
-    return extractLastAssistantSnapshot([message])
-  }
-
-  return { text: "", reasoning: "" }
-}
-
 function hasAssistantSnapshotChanged(next: AssistantSnapshot, current: AssistantSnapshot): boolean {
   return next.text !== current.text || next.reasoning !== current.reasoning
 }
 
 /**
- * 从当前请求关联的 assistant message 提取真实执行模型。
- *
- * 这里只认 `parentID` 命中的 assistant message，
- * 避免把历史轮次的模型串到当前卡片里。
+ * 从 session 消息列表末尾反向查找，提取第一个包含完整 providerID/modelID 的 assistant message。
  */
-function extractAssistantModelForRequests(
+function extractAssistantModel(
   messages: Array<{
     info: {
       role?: string
-      parentID?: unknown
       providerID?: unknown
       modelID?: unknown
       [key: string]: unknown
     }
   }>,
-  requestMessageIds: readonly string[],
 ): string | undefined {
-  if (requestMessageIds.length === 0) return undefined
-  const requestIdSet = new Set(requestMessageIds)
-
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const assistant = messages[index]?.info
-    if (assistant?.role !== "assistant") continue
-
-    const parentID = typeof assistant.parentID === "string" ? assistant.parentID.trim() : ""
-    if (!parentID || !requestIdSet.has(parentID)) continue
-
-    const providerID = typeof assistant.providerID === "string" ? assistant.providerID.trim() : ""
-    const modelID = typeof assistant.modelID === "string" ? assistant.modelID.trim() : ""
-    // 同一轮里可能先出现一个尚未补全模型字段的 assistant 记录，此时继续向前找稳定记录。
+    const info = messages[index]?.info
+    // 遇到 user message 说明已离开当前 turn，停止搜索避免拾取旧 turn 的模型信息。
+    if (info?.role === "user") break
+    if (info?.role !== "assistant") continue
+    const providerID = typeof info.providerID === "string" ? info.providerID.trim() : ""
+    const modelID = typeof info.modelID === "string" ? info.modelID.trim() : ""
     if (!providerID || !modelID) continue
-
     return `${providerID}/${modelID}`
   }
-
   return undefined
 }

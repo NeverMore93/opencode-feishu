@@ -7,15 +7,16 @@ import { cleanMarkdown, truncateMarkdown } from "./markdown.js"
 // Re-export 保持其他 feishu 模块（streaming-card）的 import 路径不变。
 export type { DetailPhaseSnapshot, DetailPhaseStatus }
 
-export const TITLE_ELEMENT_ID = "reply_title"
 export const STATUS_ELEMENT_ID = "reply_status"
-export const CONCLUSION_ELEMENT_ID = "reply_conclusion"
+export const REPLY_ELEMENT_ID = "reply_text"
 export const DETAILS_ELEMENT_ID = "reply_details"
 export const DETAILS_CONTENT_ELEMENT_ID = "reply_details_content"
 export const ACTIONS_ELEMENT_ID = "reply_actions"
 
 const DEFAULT_TITLE = "AI 回复"
-const DEFAULT_CONCLUSION = "正在整理结果..."
+// agent 输出为空时显示的 plugin UI 占位描述。
+// 斜体 markdown 明示这是 plugin 状态而非 agent 内容（避免 plugin 编造代替 agent 发言）。
+const EMPTY_REPLY_PLACEHOLDER = "_⏳ 等待 agent 回复_"
 const MAX_TITLE_LENGTH = 72
 
 type HeaderTemplate = "blue" | "green" | "orange" | "red" | "purple" | "grey"
@@ -40,7 +41,7 @@ export interface ReplyCardView {
   runId: string
   title: string
   compactStatus: string
-  conclusion: string
+  replyText: string
   detailsCollapsed: boolean
   detailsMarkdown?: string
   terminalState?: ReplyTerminalState
@@ -81,7 +82,7 @@ export function buildCompactStatus(state: ReplyRunState): string {
     case "starting":
       return "⏳ 正在建立结果卡"
     case "running":
-      return "⏳ 正在生成结论"
+      return "⏳ 正在生成回复"
     case "completing":
       return "✅ 正在收尾"
     case "aborting":
@@ -175,20 +176,22 @@ export function createReplyCardView(params: {
   runId: string
   title: string
   state: ReplyRunState
-  conclusion?: string
+  replyText?: string
   detailsMarkdown?: string
   actions?: ReplyCardAction[]
   fallbackMode?: "structured" | "simple"
   terminalState?: ReplyTerminalState
 }): ReplyCardView {
   const title = normalizeReplyTitle(params.title)
-  const conclusion = normalizeBlockMarkdown(params.conclusion ?? "") || DEFAULT_CONCLUSION
+  // replyText 不在这里 normalize：buildReplyMarkdown / buildSimpleFallbackText 会各自处理
+  // 提前 normalize 会让 cleanMarkdown 跑两次（HTML 解析 + 代码块闭合都重复）
+  const replyText = params.replyText ?? ""
   const terminalState = params.terminalState ?? toTerminalState(params.state)
   return {
     runId: params.runId,
     title,
     compactStatus: buildCompactStatus(params.state),
-    conclusion,
+    replyText,
     detailsCollapsed: true,
     detailsMarkdown: params.detailsMarkdown,
     terminalState,
@@ -199,10 +202,11 @@ export function createReplyCardView(params: {
 }
 
 export function buildReplyCardSchema(view: ReplyCardView): CardKitSchema {
+  // 用户消息标题升到 header.title（CardKit 协议字段，载体级，创建时设定）
+  // body 区只剩 status（plugin 自身状态）+ reply（agent 文本原样）+ details + actions
   const elements: Array<Record<string, unknown>> = [
-    buildMarkdownElement(TITLE_ELEMENT_ID, buildTitleMarkdown(view.title)),
     buildMarkdownElement(STATUS_ELEMENT_ID, buildStatusMarkdown(view.compactStatus)),
-    buildMarkdownElement(CONCLUSION_ELEMENT_ID, buildConclusionMarkdown(view.conclusion)),
+    buildMarkdownElement(REPLY_ELEMENT_ID, buildReplyMarkdown(view.replyText)),
   ]
 
   const detailsElement = buildDetailsElement(view.detailsMarkdown)
@@ -219,7 +223,7 @@ export function buildReplyCardSchema(view: ReplyCardView): CardKitSchema {
         wide_screen_mode: true,
       },
       header: {
-        title: { tag: "plain_text", content: "AI 回复" },
+        title: { tag: "plain_text", content: view.title.trim() || DEFAULT_TITLE },
         template: view.headerTemplate,
       },
       body: {
@@ -229,16 +233,13 @@ export function buildReplyCardSchema(view: ReplyCardView): CardKitSchema {
   }
 }
 
-export function buildTitleMarkdown(title: string): string {
-  return `**主题**\n${normalizeReplyTitle(title)}`
-}
-
 export function buildStatusMarkdown(status: string): string {
   return `**状态**\n${status.trim()}`
 }
 
-export function buildConclusionMarkdown(conclusion: string): string {
-  return `**结论**\n${normalizeBlockMarkdown(conclusion) || DEFAULT_CONCLUSION}`
+// agent 文本原样转 markdown element 内容；空时显示 plugin 占位（避免 plugin 编造 agent 内容）。
+export function buildReplyMarkdown(replyText: string): string {
+  return normalizeBlockMarkdown(replyText) || EMPTY_REPLY_PLACEHOLDER
 }
 
 export function buildDetailsElement(detailsMarkdown: string | undefined): Record<string, unknown> | undefined {
@@ -285,10 +286,12 @@ export function buildActionsElement(actions: readonly ReplyCardAction[]): Record
 }
 
 export function buildSimpleFallbackText(view: ReplyCardView): string {
+  // simple 模式（CardKit 不可用降级）下用纯文本结构。
+  // 不给 agent 文本贴语义标签——直接渲染原文，空时用 plugin 占位描述。
   const sections = [
-    `【${view.title || DEFAULT_TITLE}】`,
+    `【${view.title.trim() || DEFAULT_TITLE}】`,
     `状态：${view.compactStatus}`,
-    `结论：\n${normalizeBlockMarkdown(view.conclusion) || DEFAULT_CONCLUSION}`,
+    normalizeBlockMarkdown(view.replyText) || EMPTY_REPLY_PLACEHOLDER,
   ]
 
   const details = normalizeBlockMarkdown(view.detailsMarkdown ?? "")

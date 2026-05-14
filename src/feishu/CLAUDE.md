@@ -39,11 +39,12 @@
 - 累积文本、工具状态、详细步骤快照，通过 result-card-view 渲染为 CardKit JSON
 - CardKit 更新失败后进入 degraded 状态，UI 不再刷新但仍累积内存数据
 
-**result-card-view.ts** — 结果卡 JSON 模板构建
-- 构建 ReplyCardView（标题/紧凑状态/结论/详细步骤/动作区），转换为 CardKit schema
-- 从 PromptPart 提炼标题、从 ReplyRunState 推导紧凑状态文案和头部模板颜色
+**result-card-view.ts** — 结果卡 JSON 模板构建（v1.10.4 起：渲染层债务清理后简化）
+- 构建 ReplyCardView（用户消息标题升 header.title / 紧凑状态 / agent 文本原样 / 详细步骤 / 动作区），转换为 CardKit schema
+- 从 PromptPart 提炼标题升到 `header.title`（载体级，CardKit 协议字段）；从 ReplyRunState 推导紧凑状态文案和头部模板颜色
 - 构建工具调用详细步骤 markdown（折叠面板）和中止按钮动作元素
-- 简单降级模式下生成纯文本兜底内容
+- agent 文本通过 `buildReplyMarkdown` 原样渲染（无 `**结论**` 语义标签）；空时显示 `EMPTY_REPLY_PLACEHOLDER = "_⏳ 等待 agent 回复_"` 占位，明示是 plugin UI 状态非 agent 内容
+- 简单降级模式下生成纯文本兜底内容（同样无"结论"标签）
 
 **sender.ts** — 飞书消息发送/更新/删除
 - 封装 `im.message.create` 统一发送文本消息、交互卡片和 CardKit 卡片

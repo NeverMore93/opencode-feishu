@@ -43,7 +43,8 @@ const NudgeSchema = z.object({
   /** 是否启用 idle 催促能力。 */
   enabled: z.boolean().default(false),
   /** 真正送入 OpenCode 的催促文本。 */
-  message: z.string().min(1).default("上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。"),
+  // 默认文本来自 OpenCode compaction.ts:340 的 autocontinue prompt
+  message: z.string().min(1).default("Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."),
   /** 两次催促之间的最小间隔（秒）。 */
   intervalSeconds: z.number().int().positive().max(300).default(30),
   /** 同一会话内最多催促多少次。 */
@@ -65,8 +66,6 @@ export const FeishuConfigSchema = z.object({
   appSecret: z.string().min(1, "appSecret 不能为空"),
   /** 对话轮询总超时。 */
   timeout: z.number().int().positive().optional(),
-  /** 延迟多久显示“正在思考…”占位。 */
-  thinkingDelay: z.number().int().nonnegative().default(2_500),
   /** 飞书 SDK 的内部日志等级。 */
   logLevel: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
   /** 入群后最多摄入多少条历史消息。 */

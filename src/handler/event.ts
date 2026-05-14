@@ -145,44 +145,12 @@ export async function handleEvent(
   deps: EventDeps,
 ): Promise<void> {
   switch (event.type) {
-    case "message.part.delta": {
-      const props = (event as any).properties as {
-        sessionID?: string
-        messageID?: string
-        delta?: string
-      }
-      const { sessionID, messageID, delta } = props
-      if (!sessionID || !delta) break
-      const deltaPayload = pendingBySession.get(sessionID)
-      if (!deltaPayload) break
-      if (!matchOrLatchMessageId(deltaPayload, messageID)) return
-      deltaPayload.hasActivity = true
-      deltaPayload.textBuffer += delta
-
-      if (deltaPayload.mirrorTextToMessage && deltaPayload.placeholderId && deltaPayload.textBuffer) {
-        const res = await sender.updateMessage(
-          deltaPayload.feishuClient,
-          deltaPayload.placeholderId,
-          deltaPayload.textBuffer || " ",
-          deps.log,
-        )
-        if (!res.ok) {
-          deps.log("error", "更新飞书占位消息失败（delta）", {
-            sessionId: sessionID,
-            placeholderId: deltaPayload.placeholderId,
-            error: res.error ?? "unknown",
-          })
-        }
-      }
-
-      emit(sessionID, {
-        type: "text-updated",
-        sessionId: sessionID,
-        delta,
-        fullText: deltaPayload.textBuffer,
-      }, deps.log)
-      break
-    }
+    // message.part.delta 不再处理：v1.10.5 起完全依赖 message.part.updated 快照路径。
+    // - 主路径：streaming-card 走 polling onSnapshot（chat.ts:545）整段替换，从未消费 delta
+    // - 降级路径（mirrorTextToMessage=true）：由 message.part.updated 在 handleMessagePartUpdated 中
+    //   sender.updateMessage 兜底（粒度从"逐字打字"退化为"part 级块刷"，但仍可用）
+    // - 移除原因：原 emit "text-updated" 在 chat.ts:446 是 deliberate NO-OP；整条链路 30+ 行
+    //   仅服务降级时的"逐字感"，代价是 reasoning field 污染主回复 textBuffer 的真 bug
     case "message.part.updated": {
       const part = (event as any).properties?.part as { sessionID?: string; messageID?: unknown; type?: string; text?: string; [key: string]: unknown } | undefined
       if (!part?.sessionID) break
@@ -280,7 +248,11 @@ async function handleMessagePartUpdated(
     return
   }
 
-  // message.part.updated 只处理 text 类型的全量快照（delta 已由 message.part.delta 处理）
+  // message.part.updated 只处理 text 类型的全量快照（v1.10.5 起 delta 路径已移除，
+  // 见本文件顶部 switch 注释；正常路径走 polling onSnapshot，降级路径靠 updated 兜底）
+  // 已知忽略的 part type（OpenCode SDK 联合类型 12 个成员，其中 tool/reasoning 已上面分支处理）：
+  // subtask / file / step-start / step-finish / snapshot / patch / agent / retry / compaction
+  // 这些都是 agent 内部状态（步骤边界 / 文件操作 / 压缩等），目前无 use case 需投影到飞书卡片
   if (part.type !== "text") return
 
   const fullText = extractPartText(part)
@@ -344,20 +316,10 @@ function handleSessionErrorEvent(event: Event, deps: EventDeps): void {
     errMsg = String(error)
   }
 
-  deps.log("warn", "收到 session.error 事件", { sessionId, errMsg })
-
-  // Phase 0 临时采样日志：记录完整 error 形状，为主 PR 的回归 fixtures 提供真实样本。
-  // 此日志在 027 主 PR 合入后删除（T035）。
-  const e = error as Record<string, unknown> | undefined
-  deps.log("warn", "session.error.raw-shape", {
-    errorName: (e as { name?: string })?.name,
-    errorKeys: e && typeof e === "object" ? Object.keys(e) : [],
-    dataKeys: (e as { data?: Record<string, unknown> })?.data && typeof (e as { data?: Record<string, unknown> }).data === "object"
-      ? Object.keys((e as { data: Record<string, unknown> }).data)
-      : [],
-    dataMessage: ((e as { data?: { message?: string } })?.data?.message ?? "").slice(0, 500),
-    sessionId,
-  })
+  // orphan = 错误属于未注册的 session（典型场景：启动期 plugin/MCP 加载失败）；
+  // 这类错误没有主链路消费 sessionErrors 缓存，只能靠日志暴露给运维。
+  const orphan = !pendingBySession.has(sessionId)
+  deps.log("warn", "收到 session.error 事件", { sessionId, errMsg, orphan })
 
   sessionErrors.set(sessionId, { message: errMsg, raw: error })
 
@@ -476,7 +438,7 @@ async function nudgeIfToolIdle(sessionId: string, deps: EventDeps): Promise<void
       path: { id: sessionId },
       query,
       // `synthetic: true` 用来告诉 OpenCode：这是插件的内部催促，不是用户显式输入。
-      body: { parts: [{ type: "text", text: deps.nudge.message, synthetic: true } as const] },
+      body: { parts: [{ type: "text", text: deps.nudge.message, synthetic: true, metadata: { compaction_continue: true } } as const] },
     })
   } catch (err) {
     log("error", "session.idle 催促失败", {

@@ -22,10 +22,12 @@
 ## 文件职责
 
 **chat.ts** — 核心对话处理器
-- `handleChat()` 完整走完一条飞书消息：绑定 session → 构造 prompt → `promptAsync()` 异步发送 → 轮询等待输出稳定 → 写回飞书
+- `handleChat()` 完整走完一条飞书消息：绑定 session → 捕获 baseline → 构造 prompt → `promptAsync()` 异步发送 → 轮询等待输出稳定 → 写回飞书
 - 启动 StreamingCard（CardKit 不可用时降级为纯文本占位），通过 action-bus 订阅 text-updated / tool-state-changed / permission / question 事件实时更新卡片
 - 轮询期间每轮检查 SSE 缓存错误，检测到 `SessionErrorDetected` 立即终止
 - catch 块是 `classify()` 的**唯一调用点**（FR-011）：通过 `matchPluginError` exhaustive handler 分发到具体错误处理路径
+
+**baseline 机制（v1.10.7 引入）**：`promptAsync` 之前抓一张 `extractLastAssistantSnapshot` 作为 baseline，传给 `pollForResponse`。轮询过程中若 snapshot 与 baseline 完全相同（旧 turn 的回复未变），跳过本轮不累计 `sameCount`。这避免了"复用 session + 新 turn 慢"场景下 stable 检查在第一次轮询就被旧文本满足，把上一轮回复误当作本轮输出返回。捕获时调用 `log("info", "baseline captured", ...)`，渲染后形态为 `[feishu] baseline captured`（`[feishu]` 前缀由 `src/index.ts` 的 `LOG_PREFIX` 自动添加，源码中**勿手动加**），含 `sessionKey` / `sessionId` / `fetchSuccess` / `hasBaseline` / `textLen` / `reasoningLen`，用于事后验证修复是否生效。
 
 **event.ts** — SSE 事件分发与状态缓存
 - `handleEvent()` 接收 OpenCode 事件，按类型分发：`message.part.updated` 更新占位消息或卡片，`permission.asked` / `question.asked` / `session.idle` 转发到 action-bus
@@ -44,8 +46,15 @@
 
 **interactive.ts** — 权限/问答交互卡片与按钮回调
 - `handlePermissionRequested()` / `handleQuestionRequested()` 使用 `buildCardFromDSL` 构建交互卡片并发送到飞书，`seenIds` TtlMap 防止重复发送
-- `handleCardAction()` 解析卡片按钮回调 value → 路由到 v2Client 的 permission / question / abort reply
+- `handleCardAction()` 解析卡片按钮回调 value → 路由到 v2Client 的 permission / question / abort reply；spec 031 扩展了 `ParsedCardActionValue` 联合（新增 `FormSubmitActionValue` 第 5 种 action）和 `normalizeFormValue` / `validateChatScopeForFormSubmit` 辅助函数
 - `buildCallbackResponse()` 返回 toast 即时反馈（飞书 3 秒约束），abort 按钮通过 reply-run-registry 管理取消流程
+- `buildFormSubmitPrompt()` 构造 form_submit 的结构化 prompt 前缀（FR-018 + FR-020a），含 displayName 解析 + JSON 包装
+
+**pending-forms.ts** — 阻塞型 feishu_request_form tool 的全局注册表
+- `PendingForm` interface（formName / sessionId / chatId / createdAt / resolver）+ `FormSubmitResult` interface（formValue / operatorId / timezone / callbackChatId）
+- `registerPendingForm()` / `unregisterPendingForm()` 注册和清理
+- `resolvePendingForm()` 三路 race 的核心：chatId 跨群拒收（EC-024）→ resolver 触发 → 返回 boolean 供 gateway 判定 P3 命中或 P1 fallback
+- TtlMap 自动过期（MAX_FORM_TIMEOUT_SECONDS = 1800s 兜底）
 
 **errors.ts** — 错误分类（typed discriminated union）
 - `classify(raw): PluginError` 纯函数，按优先级链判定：Auth → Context → Model → Poison → fallback
@@ -76,8 +85,6 @@
 | L5 | event.ts | expectedMessageId 防止事件串扰 |
 
 错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）。
-
-**Phase 0 临时日志**：`session.error.raw-shape` 记录完整 error 形状（name、keys、data.message），用于 spec 027 真实样本采集。此日志在 027 主 PR 合入后删除。
 
 **L1** event.ts 缓存 raw error 对象 + 提取消息字符串。`classify()` 在 chat.ts catch 块中消费 raw error，按优先级链判定 kind。
 
@@ -115,7 +122,7 @@
 
 ### `mirrorTextToMessage`（chat.ts 写 / event.ts 读）
 
-- CardKit 不可用或 `StreamingCard.start()` 失败时，`chat.ts` 在 `thinkingDelay` 后会发一条纯文本“正在思考…”占位消息。
+- CardKit 不可用或 `StreamingCard.start()` 失败时，`chat.ts` 立即发一条纯文本”正在思考…”占位消息。
 - 该占位走 `registerPending({ placeholderId, feishuClient, mirrorTextToMessage: true })` 注册到 pending 表。
 - `event.ts` 处理 `message.part.updated` 时读该 flag：`true` 直接更新飞书文本消息；否则走 `streamingCard` 卡片更新。
 - 改 `chat.ts` 的 fallback 注册逻辑必须同步检查 `event.ts` 的 mirror 分支；反之亦然。该路径无法承载 abort 按钮，是有意的降级代价。
@@ -126,3 +133,17 @@
 - 首个 `message.part.updated` 事件到达时把 `part.messageID` 写入 `expectedMessageId`。
 - 之后所有 messageID 不匹配的事件**静默丢弃**，防止同一 session 内多 run 事件串线到当前卡片。
 - 依赖：`session-queue.ts` 的 per-sessionKey FIFO 串行保证首个事件属于当前 run。改队列或 pending 生命周期时必须保留“首锁 + 后过滤”语义。
+
+## 反模式修复回归原则（toast / async fire-and-forget）
+
+修一处反模式（如 `interactive.ts` 中"toast 完成态 + v2Client async fire-and-forget"）后，必须**按结构而非文案**扫描所有同构兄弟。grep 文案（"已发送"/"已收到"）只能命中已知 caller，无法发现结构相同但语义不同的兄弟（如 `permission_reply` / `question_reply` / `abort_reply`）。
+
+实例：v1.10.5 PR #74 修复 F21 send_message + form_submit 的 toast 矛盾信号，但漏扫 3 处同构反模式（v1.10.6 PR-A 补修）。
+
+**修反模式 PR 必须配同构扫描清单**：
+
+1. `void deps.v2Client.*.then().catch(...)` 的所有 caller：toast 必须是进行态（`type: "info"`）
+2. 失败处理是否仅 `emitPhase("error")` / log 而无对等用户面提示：列入待补救
+3. 不写"反模式清零"声明；改写"已修 X / Y / Z 三处实例，结构同构扫描已完成"
+
+详细规则与历史背景见本地 `docs/fallback-design-rules.md § 11`（不入 git，仅作 Claude review 必读输入）。

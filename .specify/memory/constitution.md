@@ -1,11 +1,10 @@
 <!--
 同步影响报告
 ==================
-- 版本变更：3.0.0 → 3.1.0（次版本）
+- 版本变更：3.1.0 → 3.2.0（次版本）
 - 修改的原则：
-  - 十一（session.idle 催促）：skill 指导优先 → 最小 runtime prompt + 兜底催促
-- 新增章节：
-  - 十五（Prompt 与 Skill 分层）：运行时 prompt 与正式技能文档职责拆分
+  - 十五（Prompt 分层）：严格透传 → 形式可塑、意义不变
+- 新增章节：无（十五条改写而非新增）
 - 移除章节：无
 - 需更新模板：无
 - 后续 TODO：无
@@ -42,7 +41,7 @@ opencode-feishu 是 OpenCode 的飞书插件，不是独立服务。
 ### 四、配置管理
 - 必需配置：`appId`、`appSecret`（在 `~/.config/opencode/plugins/feishu.json` 中声明）
 - 插件声明：在 `opencode.json` 的 `"plugin"` 字段中列出 `"opencode-feishu"`
-- 可选配置：`timeout`、`thinkingDelay`、`logLevel`、`maxHistoryMessages`、
+- 可选配置：`timeout`、`logLevel`、`maxHistoryMessages`、
   `pollInterval`、`stablePolls`、`dedupTtl`、`maxResourceSize`、`directory`
 - 催促配置：`nudge` 对象（`enabled`、`message`、`intervalSeconds`、`maxIterations`），
   默认关闭。由 session.idle 事件驱动，非定时轮询
@@ -135,15 +134,44 @@ AI 工具调用后停止时，通过 session.idle 事件按需催促继续，替
 
 **原则**：所有不可逆的共享状态变更（commit/push/merge/publish）MUST 等待用户确认。
 
-### 十五、Prompt 与 Skill 分层
-面向飞书会话的运行时 prompt 与正式技能文档 MUST 分层维护。
-- `skills/<name>/prompt.md` 仅允许包含当前渠道事实、工具契约、渲染/回调约束和显式 non-goals
-- `skills/<name>/SKILL.md` 仅用于技能发现、维护、评审和演进，不得整份注入运行时 system prompt
-- 插件 MUST 尽量保持透传，只负责渠道承载、展示控制和交互承载，不主动塑形 agent 的内容性输入输出
-- runtime prompt MUST NOT 写入“何时发卡”“如何组织标题/摘要/结论”“按钮推荐文案”“发送前自检”等输出策略指令
-- 详细 schema、示例和维护说明 SHOULD 放入 `SKILL.md` 或其 `references/`，而不是扩张 `prompt.md`
-- `prompt.md` 不得写入否定式控制约束（如”按钮不是 abort”）；改用正向陈述描述行为事实。
-- 控制层约束（schema 校验、回调 fallback 等）必须留在实现层，不得迁移到 prompt 层承担。
+### 十五、Prompt 分层
+
+飞书插件的存在意义是把 OpenCode 的输出格式化成适合飞书渠道的交互形态。
+runtime prompt 可以引导**形式**（如何展示），但不得干预**意义**（说什么）。
+
+#### 概念边界
+
+- **形式**：展示载体（文本/卡片/按钮/输入栏）、结构化方式（分段、折叠）、
+  交互形态（按钮触发回复、输入栏收集信息）、markdown 用法、长度形式建议
+- **意义**：结论、判断、观点、答案实质、执行决策、流程节奏
+
+#### prompt.md 允许写入
+
+- 当前渠道事实（”会话来自飞书”）
+- 工具契约（”主回复进入卡片”）
+- 形式引导：
+  - “较长输出建议用 feishu_send_card 卡片化展示”
+  - “提及'下一步动作'时建议把动作呈现为按钮”
+  - “需要用户提供信息才能继续时建议使用输入组件”
+- 渲染/回调约束（28KB 截断、HTML 自动移除）
+- 显式 non-goals（”插件不选择模型、不解析命令”）
+
+#### prompt.md 禁止写入
+
+- 内容意义干预：”分析必须给结论”、”对比必须给摘要”
+- 流程塑形：”先 X 再 Y 再 Z”、”执行前先公示计划”
+- 自检/审查指令：”声称完成前先验证”、”展示输出作为证据”
+- 输出文案规定：”按钮 value 写自然语言指令”
+- 否定式约束（如”按钮不是 abort”）；改用正向陈述
+
+#### 归属规则
+
+- 控制层约束（schema 校验、size 限制、HTML 过滤）必须留在实现层，不靠 prompt 劝诫
+- 工具具体用法（颜色语义表、参数细节、字段约束）属于 tool description
+  和 Zod schema describe，不属于 system prompt
+- 渠道无关的形式偏好（如”代码用三反引号”）应归 OpenCode 全局 agent prompt，不写入飞书层
+- 形式引导用”建议”/”可以”语气，避免”必须”/”应当”
+  例：✅ “较长输出建议卡片化”  ❌ “长输出必须用卡片”
 
 ## 治理规则
 
@@ -151,4 +179,4 @@ AI 工具调用后停止时，通过 session.idle 事件按需催促继续，替
 
 所有代码变更和文档修改必须符合本约定。
 
-**版本**: 3.1.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-04-14
+**版本**: 3.2.0 | **制定日期**: 2026-02-09 | **最后修订**: 2026-04-28

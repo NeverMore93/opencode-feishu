@@ -1,12 +1,13 @@
 /**
  * StreamingCard：单次 AI 回复对应的一张结构化结果卡。
  *
- * 这张卡不再把主回复当成单一正文流，而是稳定地分成：
- * - 主题
- * - 紧凑状态
- * - 当前结论
- * - 详细步骤（默认折叠）
- * - 底部动作区（处理中可见）
+ * 卡片结构：
+ * - Header.title：用户消息截首行（CardKit 协议字段，创建时设定后不可变）
+ * - Header.template：state 颜色编码（载体级，创建时设定后不可变）
+ * - Body element 1: 状态（plugin 自身状态展示，动态更新）
+ * - Body element 2: agent 文本原样（无语义标签）
+ * - Body element 3: 详细步骤折叠面板（plugin 投影 SSE 事件）
+ * - Body element 4: 中断按钮
  */
 import type { CardKitClient } from "./cardkit.js"
 import type { LogFn } from "../types.js"
@@ -14,14 +15,15 @@ import * as sender from "./sender.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import {
   ACTIONS_ELEMENT_ID,
+  REPLY_ELEMENT_ID,
+  STATUS_ELEMENT_ID,
   buildActionsElement,
   buildCompactStatus,
-  buildConclusionMarkdown,
   buildDetailsElement,
   buildDetailsMarkdown,
   buildReplyCardSchema,
+  buildReplyMarkdown,
   buildStatusMarkdown,
-  buildTitleMarkdown,
   createReplyCardView,
   type DetailPhaseSnapshot,
   type ReplyCardAction,
@@ -57,8 +59,8 @@ export class StreamingCard {
   private queue: Promise<void> = Promise.resolve()
   /** 卡片是否已关闭/销毁。 */
   private closed = false
-  /** 当前稳定结论。 */
-  private conclusion = ""
+  /** agent 当前的文本输出（累积或 snapshot 替换得到）。 */
+  private replyText = ""
   /** 当前运行状态。 */
   private runState: ReplyRunState
   /** 终态标记。 */
@@ -73,15 +75,16 @@ export class StreamingCard {
   private detailsElementPresent = false
   /** 避免重复写相同内容。 */
   private readonly rendered = {
-    title: "",
     status: "",
-    conclusion: "",
+    replyText: "",
     details: "",
     actionsSignature: "",
   }
   /** CardKit 中途更新失败后进入 degraded，后续只保留本地快照用于文本回退。 */
   private degraded = false
   private degradedError?: Error
+  /** Reply 区 debounce 定时器 ID（null = 无挂起）。 */
+  private replyTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly cardkit: CardKitClient,
@@ -112,32 +115,25 @@ export class StreamingCard {
   }
 
   /**
-   * 兼容旧接口：把 delta 直接追加到结论区。
+   * 把 delta 直接追加到 reply 区。
    *
    * 结构化结果卡的推荐路径是使用 `replaceText()` 做稳定快照刷新。
    */
   async updateText(delta: string): Promise<void> {
     if (this.closed || !this.cardId || this.terminalState) return
-    this.conclusion += delta
+    this.replyText += delta
     if (this.degraded) return
-    this.enqueue(() => this.renderConclusion())
+    this.scheduleReplyRender()
   }
 
   /**
-   * 用完整文本替换当前结论快照。
+   * 用完整文本替换当前 reply 快照。
    */
   async replaceText(fullText: string): Promise<void> {
     if (this.closed || !this.cardId || this.terminalState) return
-    this.conclusion = fullText
+    this.replyText = fullText
     if (this.degraded) return
-    this.enqueue(() => this.renderConclusion())
-  }
-
-  async setTitle(title: string): Promise<void> {
-    if (this.closed || !this.cardId || this.terminalState) return
-    this.meta.title = title
-    if (this.degraded) return
-    this.enqueue(() => this.renderTitle())
+    this.scheduleReplyRender()
   }
 
   async setRunState(state: ReplyRunState, terminalState?: ReplyTerminalState): Promise<void> {
@@ -193,19 +189,21 @@ export class StreamingCard {
   }
 
   /**
-   * 关闭流式模式，并把最终结论写回卡片。
+   * 关闭流式模式，并把最终 reply 写回卡片。
    */
-  async close(finalConclusion?: string): Promise<void> {
+  async close(finalReply?: string): Promise<void> {
     if (this.closed) return
     if (!this.cardId) {
       this.closed = true
       return
     }
 
-    if (finalConclusion) {
-      this.conclusion = finalConclusion
+    if (finalReply) {
+      this.replyText = finalReply
     }
 
+    // flush 挂起的 debounce 定时器，确保最新 reply 进入队列
+    this.flushReplyTimer()
     await this.drain()
     if (this.degraded) {
       this.closed = true
@@ -214,13 +212,23 @@ export class StreamingCard {
 
     try {
       await this.renderAll()
-      await this.cardkit.closeStreaming(this.cardId, ++this.seq)
-      this.closed = true
     } catch (err) {
       this.markDegraded(err)
       this.closed = true
       throw this.degradedError ?? new Error("StreamingCard 收尾失败")
     }
+
+    // renderAll 成功后内容已完整写入卡片；closeStreaming 失败只影响流式指示器，
+    // 不应删除已渲染的结构化内容。降级为日志记录，保留卡片。
+    try {
+      await this.cardkit.closeStreaming(this.cardId, ++this.seq)
+    } catch (err) {
+      this.log("error", "closeStreaming 失败（内容已完整渲染）", {
+        cardId: this.cardId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    this.closed = true
   }
 
   /**
@@ -239,8 +247,41 @@ export class StreamingCard {
    */
   async destroy(): Promise<void> {
     this.closed = true
+    if (this.replyTimer) {
+      clearTimeout(this.replyTimer)
+      this.replyTimer = null
+    }
     if (this.messageId) {
       await sender.deleteMessage(this.feishuClient, this.messageId, this.log)
+    }
+  }
+
+  /**
+   * Debounce reply 区渲染：200ms 内无新 delta 才真正触发。
+   *
+   * 流式场景下每秒 30-100 次 delta，直接 enqueue 每次都会发起
+   * CardKit HTTP 请求，是导致 degraded 的主要根因。
+   * 200ms 窗口可将 CardKit 调用频率降至 ~5次/秒，与 Vercel AI SDK
+   * 的 experimental_throttle(50ms) 思路一致，但更宽松以适配服务端 API。
+   */
+  private scheduleReplyRender(): void {
+    if (this.replyTimer) {
+      clearTimeout(this.replyTimer)
+    }
+    this.replyTimer = setTimeout(() => {
+      this.replyTimer = null
+      this.enqueue(() => this.renderReply())
+    }, 200)
+  }
+
+  /**
+   * 立即 flush 挂起的 debounce 定时器（close/drain 前调用）。
+   */
+  private flushReplyTimer(): void {
+    if (this.replyTimer) {
+      clearTimeout(this.replyTimer)
+      this.replyTimer = null
+      this.enqueue(() => this.renderReply())
     }
   }
 
@@ -268,18 +309,9 @@ export class StreamingCard {
   }
 
   private async renderAll(): Promise<void> {
-    await this.renderTitle()
     await this.renderStatusAndActions()
-    await this.renderConclusion()
+    await this.renderReply()
     await this.renderDetails()
-  }
-
-  private async renderTitle(): Promise<void> {
-    if (!this.cardId) return
-    const content = buildTitleMarkdown(this.meta.title ?? "AI 回复")
-    if (this.rendered.title === content) return
-    this.rendered.title = content
-    await this.cardkit.updateElement(this.cardId, "reply_title", content, ++this.seq)
   }
 
   private async renderStatusAndActions(): Promise<void> {
@@ -288,18 +320,18 @@ export class StreamingCard {
     const status = buildStatusMarkdown(buildCompactStatus(this.runState))
     if (this.rendered.status !== status) {
       this.rendered.status = status
-      await this.cardkit.updateElement(this.cardId, "reply_status", status, ++this.seq)
+      await this.cardkit.updateElement(this.cardId, STATUS_ELEMENT_ID, status, ++this.seq)
     }
 
     await this.renderActions()
   }
 
-  private async renderConclusion(): Promise<void> {
+  private async renderReply(): Promise<void> {
     if (!this.cardId) return
-    const content = buildConclusionMarkdown(this.conclusion)
-    if (this.rendered.conclusion === content) return
-    this.rendered.conclusion = content
-    await this.cardkit.updateElement(this.cardId, "reply_conclusion", content, ++this.seq)
+    const content = buildReplyMarkdown(this.replyText)
+    if (this.rendered.replyText === content) return
+    this.rendered.replyText = content
+    await this.cardkit.updateElement(this.cardId, REPLY_ELEMENT_ID, content, ++this.seq)
   }
 
   private async renderToolDetails(): Promise<void> {
@@ -410,7 +442,7 @@ export class StreamingCard {
       runId: this.meta.runId,
       title: this.meta.title ?? "AI 回复",
       state: this.runState,
-      conclusion: this.conclusion,
+      replyText: this.replyText,
       detailsMarkdown,
       actions: this.meta.abortAction ? [this.meta.abortAction] : [],
       terminalState: this.terminalState,
