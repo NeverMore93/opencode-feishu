@@ -26,12 +26,23 @@ jobs:
       id-token: write
 
     steps:
+      - name: Detect OIDC availability
+        id: oidc
+        shell: bash
+        run: |
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
+        if: steps.oidc.outputs.available == 'true'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
@@ -41,4 +52,10 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Skip Claude review when OIDC is unavailable
+        if: steps.oidc.outputs.available != 'true'
+        run: |
+          echo "OIDC token env vars are not available in this run context."
+          echo "Skipping Claude Code Review to avoid false-negative CI failures."
 
