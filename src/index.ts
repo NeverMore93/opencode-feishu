@@ -52,6 +52,17 @@ const LOG_PREFIX = "[feishu]"
 const isDebug = !!process.env.FEISHU_DEBUG
 
 /**
+ * opencode-otel 等 stderr→OTLP 转发器按「行首英文级别词」映射 Severity；
+ * 裸 JSON 会以 UNSPECIFIED 发出，部分 collector 会丢弃或不好检索。
+ * @see https://www.npmjs.com/package/opencode-otel — Log Severity Mapping
+ */
+function otelStderrLinePrefix(level: "info" | "warn" | "error"): string {
+  if (level === "error") return "ERROR"
+  if (level === "warn") return "WARN"
+  return "INFO"
+}
+
+/**
  * 从 prompts/ 目录加载飞书运行时 prompt（system prompt 片段）。
  *
  * 这里只注入飞书渠道事实和工具契约，不注入任何会塑形 agent 输出策略的维护文档。
@@ -87,7 +98,9 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const log: LogFn = (level, message, extra) => {
     const prefixed = `${LOG_PREFIX} ${message}`
     if (isDebug) {
-      console.error(JSON.stringify({ ts: new Date().toISOString(), service: SERVICE_NAME, level, message: prefixed, ...extra }))
+      const payload = JSON.stringify({ ts: new Date().toISOString(), service: SERVICE_NAME, level, message: prefixed, ...extra })
+      // 行首级别词 + 空格 + JSON，便于 opencode-otel 映射为 INFO/WARN/ERROR
+      console.error(`${otelStderrLinePrefix(level)} ${payload}`)
     }
     client.app.log({
       body: {

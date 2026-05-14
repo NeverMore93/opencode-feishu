@@ -300,6 +300,40 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   // 同一飞书聊天会稳定映射到同一个逻辑 sessionKey。
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
 
+  // 显式会话控制命令：/new
+  // 在插件层处理，避免把命令透传给模型后只返回“口头确认”却未真正切换 session。
+  if (shouldReply && messageType === "text" && content.trim() === "/new") {
+    invalidateSession(sessionKey)
+    const freshSession = await getOrCreateSession(client, sessionKey, directory)
+    registerSessionChat(freshSession.id, chatId, chatType)
+    clearNudge(freshSession.id)
+    clearRetryAttempts(sessionKey)
+
+    const ack = await sender.sendTextMessage(
+      feishuClient,
+      chatId,
+      `✅ 已创建新会话（${freshSession.id}）。请继续发送你的问题。`,
+      log,
+    )
+    if (!ack.ok) {
+      log("error", "发送 /new 确认消息失败", {
+        chatId,
+        sessionKey,
+        sessionId: freshSession.id,
+        error: ack.error ?? "unknown",
+      })
+    }
+
+    log("info", "用户触发 /new，已创建新会话", {
+      chatId,
+      chatType,
+      senderId,
+      sessionKey,
+      newSessionId: freshSession.id,
+    })
+    return undefined
+  }
+
   // 绑定或恢复 OpenCode session，并刷新 session → 飞书聊天映射。
   const session = await getOrCreateSession(client, sessionKey, directory)
   registerSessionChat(session.id, chatId, chatType)

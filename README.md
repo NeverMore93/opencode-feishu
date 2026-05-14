@@ -112,6 +112,11 @@ opencode
 
 支持的消息类型：text / image / 富文本 (post) / file / audio / 卡片 / quote。详见 BEHAVIOR.md §4.2。
 
+### 会话命令
+
+- `/new`：由插件直接处理，立即重置当前飞书逻辑会话并创建新的 OpenCode session。
+- 其他 `/` 命令（如 `/reset`、`/help`）不会被插件解析，仍会原样发送给 agent。
+
 ## 开发
 
 ```bash
