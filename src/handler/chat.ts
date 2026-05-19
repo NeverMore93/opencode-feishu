@@ -68,13 +68,13 @@ function traceLangfuseUser(
   const activeTraceId = activeSpan?.spanContext().traceId
 
   if (activeSpan) {
-    activeSpan.setAttribute("langfuse.trace.name", "feishu-message")
+    activeSpan.setAttribute("langfuse.trace.name", "支付agent")
     activeSpan.setAttribute("langfuse.session.id", sessionId)
     activeSpan.setAttribute("langfuse.user.id", userId)
   }
 
   const traceBody: Record<string, string> = {
-    name: "feishu-message",
+    name: "支付agent",
     sessionId,
     userId,
   }
