@@ -12,6 +12,7 @@
 import type { FeishuMessageContext, ResolvedConfig, LogFn } from "../types.js"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import type { OpencodeClient as V2OpencodeClient } from "@opencode-ai/sdk/v2/client"
+import { trace } from "@opentelemetry/api"
 import * as sender from "../feishu/sender.js"
 import {
   registerPending, unregisterPending,
@@ -63,6 +64,23 @@ function traceLangfuseUser(
 
   const baseUrl = process.env.LANGFUSE_BASEURL ?? "https://cloud.langfuse.com"
   const auth = Buffer.from(`${publicKey}:${secretKey}`).toString("base64")
+  const activeSpan = trace.getActiveSpan()
+  const activeTraceId = activeSpan?.spanContext().traceId
+
+  if (activeSpan) {
+    activeSpan.setAttribute("langfuse.trace.name", "feishu-message")
+    activeSpan.setAttribute("langfuse.session.id", sessionId)
+    activeSpan.setAttribute("langfuse.user.id", userId)
+  }
+
+  const traceBody: Record<string, string> = {
+    name: "feishu-message",
+    sessionId,
+    userId,
+  }
+  if (activeTraceId) {
+    traceBody.id = activeTraceId
+  }
 
   // 完全异步上报，绝不等待它完成。
   fetch(`${baseUrl}/api/public/ingestion`, {
@@ -73,9 +91,10 @@ function traceLangfuseUser(
     },
     body: JSON.stringify({
       batch: [{
+        id: crypto.randomUUID(),
         type: "trace-create",
         timestamp: new Date().toISOString(),
-        body: { name: "feishu-message", sessionId, userId },
+        body: traceBody,
       }],
     }),
   }).then(async (res) => {
@@ -88,7 +107,9 @@ function traceLangfuseUser(
         return ""
       })
       log("error", "Langfuse trace API 失败", { status: res.status, body })
+      return
     }
+    log("info", "Langfuse trace-create 成功", { status: res.status, traceId: activeTraceId })
   }).catch((err) => {
     log("error", "Langfuse trace 网络失败", {
       error: err instanceof Error ? err.message : String(err),
