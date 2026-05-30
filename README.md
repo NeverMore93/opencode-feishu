@@ -47,7 +47,7 @@
 1. **添加机器人能力**
 2. **事件订阅** — 添加 `im.message.receive_v1` 和 `im.chat.member.bot.added_v1`
 3. **订阅方式** — 选择「使用长连接接收事件/回调」（不是 Webhook）
-4. **权限** — 开通 `im:message`、`im:message:send_as_bot`、`im:chat`、`im:message:readonly`、`contact:user.base:readonly`
+4. **权限** — 开通 `im:message`、`im:message:send_as_bot`、`im:chat`、`im:message:readonly`、`contact:user.base:readonly`、`cardkit:card:write`
 5. **发布应用**
 
 ### 4. 启动 OpenCode
