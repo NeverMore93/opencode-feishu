@@ -7,6 +7,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import type { LogFn } from "../types.js"
 import type { PromptPart } from "../feishu/content-extractor.js"
+import { getSessionIdleVersion } from "./action-bus.js"
 import {
   getRetryAttempts, setRetryAttempts, MAX_RETRY_ATTEMPTS, clearRetryAttempts,
   getSessionError, clearSessionError,
@@ -82,6 +83,7 @@ type PollFn = (
     stablePolls: number
     query?: { directory: string }
     signal?: AbortSignal
+    idleAfterVersion?: number
   },
 ) => Promise<string>
 
@@ -158,6 +160,7 @@ export async function tryModelRecovery(params: {
 
     // 清掉上一次调用残留的 SSE 错误，避免新一轮轮询读到旧状态。
     clearSessionError(sessionId)
+    const idleAfterVersion = getSessionIdleVersion(sessionId)
     await client.session.promptAsync({
       path: { id: sessionId },
       query,
@@ -165,7 +168,7 @@ export async function tryModelRecovery(params: {
     })
 
     const finalText = await poll(client, sessionId, {
-      timeout, pollInterval, stablePolls, query, signal,
+      timeout, pollInterval, stablePolls, query, signal, idleAfterVersion,
     })
 
     log("info", "模型恢复后响应完成", {

@@ -48,6 +48,15 @@ type ActionCallback = (action: ProcessedAction) => void | Promise<void>
 /** sessionId → 订阅回调集合。 */
 const subscribers = new Map<string, Set<ActionCallback>>()
 
+/** sessionId → 最近一次 session-idle 的单调版本号。 */
+const sessionIdleVersions = new Map<string, number>()
+let sessionIdleVersion = 0
+
+/** 读取指定 session 最近一次 session-idle 的版本号。 */
+export function getSessionIdleVersion(sessionId: string): number {
+  return sessionIdleVersions.get(sessionId) ?? 0
+}
+
 /**
  * 注册某个 session 的事件订阅。
  *
@@ -88,6 +97,10 @@ export function subscribe(
  * 单个订阅者抛错不会阻塞其他订阅者，也不会把主流程打断。
  */
 export function emit(sessionId: string, action: ProcessedAction, log?: LogFn): void {
+  if (action.type === "session-idle") {
+    sessionIdleVersions.set(sessionId, ++sessionIdleVersion)
+  }
+
   const subs = subscribers.get(sessionId)
   if (!subs) return
 
@@ -104,4 +117,3 @@ export function emit(sessionId: string, action: ProcessedAction, log?: LogFn): v
       })
   }
 }
-
