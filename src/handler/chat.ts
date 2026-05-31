@@ -945,7 +945,7 @@ async function buildPromptParts(
  * 轮询等待 AI 响应稳定，返回最终文本。
  * 每次 poll 周期检查 SSE 缓存的 session error，检测到时立即终止并抛出异常。
  */
-async function pollForResponse(
+export async function pollForResponse(
   client: OpencodeClient,
   sessionId: string,
   opts: {
@@ -1024,9 +1024,10 @@ async function pollForResponse(
           await onSnapshot(snapshot)
         }
       } else if (snapshot.text && snapshot.text.length > 0) {
-        // 文本没变：累计稳定次数，达到阈值后可认为输出基本结束。
+        // 文本稳定只说明本次 polling 没抓到新快照，不能代表 OpenCode run 已完成。
+        // 完成判定以 session.idle / timeout / abort / session.error 为准，避免工具调用期间提前收尾。
         sameCount++
-        if (sameCount >= stablePolls) break
+        if (sameCount >= stablePolls) continue
       }
     }
 

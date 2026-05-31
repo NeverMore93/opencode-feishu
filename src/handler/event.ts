@@ -357,18 +357,20 @@ function handleV2Event(event: Event, deps: EventDeps): void {
       request,
     }, deps.log)
     deps.log("info", "question.asked 事件已分发", { sessionId: evtSessionId })
-  } else if (evtType === "session.idle" && evtSessionId && pending?.hasActivity) {
+  } else if (evtType === "session.idle" && evtSessionId && pending) {
     emit(evtSessionId, {
       type: "session-idle",
       sessionId: evtSessionId,
     }, deps.log)
-    // 按需催促：检查最后一条 AI 消息是否以工具调用结尾（AI 可能卡住了）。
-    nudgeIfToolIdle(evtSessionId, deps).catch((err) => {
-      deps.log("error", "session.idle 催促任务异常退出", {
-        sessionId: evtSessionId,
-        error: err instanceof Error ? err.message : String(err),
+    if (pending.hasActivity) {
+      // 按需催促：检查最后一条 AI 消息是否以工具调用结尾（AI 可能卡住了）。
+      nudgeIfToolIdle(evtSessionId, deps).catch((err) => {
+        deps.log("error", "session.idle 催促任务异常退出", {
+          sessionId: evtSessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
       })
-    })
+    }
   }
 }
 
