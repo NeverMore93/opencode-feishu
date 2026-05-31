@@ -66,11 +66,11 @@ opencode
 |------|------|:----:|--------|------|
 | `appId` | string | 是 | — | 飞书应用 App ID |
 | `appSecret` | string | 是 | — | 飞书应用 App Secret |
-| `timeout` | number | 否 | `未设置` | 对话轮询总超时（毫秒）；未配置时不设固定超时，持续等待直到响应稳定、检测到 SSE 错误或请求被中断 |
+| `timeout` | number | 否 | `未设置` | 对话轮询总超时（毫秒）；未配置时不设固定超时，持续等待直到 OpenCode session.idle、检测到 SSE 错误或请求被中断 |
 | `logLevel` | string | 否 | `"info"` | 日志级别：fatal/error/warn/info/debug/trace |
 | `maxHistoryMessages` | number | 否 | `200` | 入群时最多摄入的历史消息条数（飞书接口按 50/页分页拉取） |
 | `pollInterval` | number | 否 | `1000` | 轮询 AI 响应的间隔（毫秒） |
-| `stablePolls` | number | 否 | `3` | 连续几次轮询内容不变视为回复完成 |
+| `stablePolls` | number | 否 | `3` | 兼容旧配置；当前回复完成以 OpenCode session.idle 为准，不再仅凭文本稳定判定完成 |
 | `dedupTtl` | number | 否 | `600000` | 消息去重缓存过期时间（毫秒） |
 | `maxResourceSize` | number | 否 | `524288000` | 单个资源最大下载大小（字节，默认 500MB） |
 | `directory` | string | 否 | `OpenCode 当前工作目录` | 默认工作目录，支持 `~` 和 `${ENV_VAR}` 展开；若 OpenCode 未提供则为空字符串 |
