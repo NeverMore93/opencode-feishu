@@ -80,6 +80,19 @@ function loadFeishuRuntimePrompt(): string {
 const feishuRuntimePrompt = loadFeishuRuntimePrompt()
 
 /**
+ * 构建插件内部 OpenCode v2 client 配置。
+ *
+ * 插件宿主可能使用动态端口启动 OpenCode server；这里必须使用 ctx.serverUrl，
+ * 否则 abort_reply 等后台回调会退回 SDK 默认地址并在动态端口下失败。
+ */
+export function buildV2ClientConfig(input: { serverUrl?: URL; directory: string }): NonNullable<Parameters<typeof createOpencodeClient>[0]> {
+  return {
+    baseUrl: input.serverUrl?.toString(),
+    directory: input.directory || undefined,
+  }
+}
+
+/**
  * OpenCode 插件入口导出。
  *
  * OpenCode 在加载插件时会调用这个工厂函数，
@@ -144,7 +157,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const botOpenId = await fetchBotOpenId(larkClient, log)
 
   // v2 client 主要用于权限审批/问答交互回调。
-  const v2Client = createOpencodeClient({ directory: resolvedConfig.directory || undefined })
+  const v2Client = createOpencodeClient(buildV2ClientConfig({ serverUrl: ctx.serverUrl, directory: resolvedConfig.directory }))
   const interactiveDeps: InteractiveDeps = { feishuClient: larkClient, log, v2Client }
 
   // 启动飞书 WebSocket 网关（复用 larkClient）

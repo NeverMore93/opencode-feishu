@@ -16,6 +16,11 @@ import {
   resetAbortForRun,
 } from "./reply-run-registry.js"
 import { emit } from "./action-bus.js"
+import {
+  buildQuestionFallbackText,
+  clearPendingQuestionByRequestId,
+  registerPendingQuestion,
+} from "./pending-questions.js"
 
 /**
  * form_submit toast 文案常量。
@@ -426,13 +431,49 @@ export function handleQuestionRequested(
   sessionId: string,
 ): void {
   const requestId = String(request.id ?? "")
-  sendRequestCard({
-    requestId,
-    chatId,
-    deps,
-    card: buildQuestionCardDSL(request, chatId, chatType, sessionId),
-    missingClientMessage: "OpenCode client 未配置，跳过问答卡片发送",
-    sendFailureMessage: "发送问答卡片失败",
+  if (!deps.v2Client) {
+    deps.log("warn", "OpenCode client 未配置，跳过问答卡片发送", { requestId })
+    return
+  }
+  if (!requestId || !markSeen(requestId)) return
+
+  registerPendingQuestion({ request, chatId, sessionId })
+
+  void (async () => {
+    const res = await sender.sendInteractiveCard(
+      deps.feishuClient,
+      chatId,
+      buildQuestionCardDSL(request, chatId, chatType, sessionId),
+      deps.log,
+    )
+    if (res.ok) return
+
+    deps.log("error", "发送问答卡片失败，回退纯文本问题", {
+      requestId,
+      chatId,
+      error: res.error ?? "unknown",
+    })
+    const fallback = await sender.sendTextMessage(
+      deps.feishuClient,
+      chatId,
+      buildQuestionFallbackText(request),
+      deps.log,
+    )
+    if (!fallback.ok) {
+      unmarkSeen(requestId)
+      deps.log("error", "发送问答纯文本 fallback 失败", {
+        requestId,
+        chatId,
+        error: fallback.error ?? "unknown",
+      })
+    }
+  })().catch((err) => {
+    unmarkSeen(requestId)
+    deps.log("error", "发送问答卡片失败", {
+      requestId,
+      chatId,
+      error: err instanceof Error ? err.message : String(err),
+    })
   })
 }
 
@@ -562,6 +603,7 @@ export async function handleCardAction(
         reply: value.reply,
       }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
     } else {
+      clearPendingQuestionByRequestId(value.requestId)
       void deps.v2Client.question.reply({
         requestID: value.requestId,
         answers: value.answers,
@@ -599,6 +641,7 @@ export function buildCallbackResponse(action: CardActionData, log?: LogFn): obje
   }
 
   if (value.action === "question_reply") {
+    clearPendingQuestionByRequestId(value.requestId)
     return {
       toast: { type: "info", content: "📨 已收到回答，正在转交..." },
     }

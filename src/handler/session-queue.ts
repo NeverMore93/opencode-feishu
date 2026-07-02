@@ -13,6 +13,7 @@
 import type { FeishuMessageContext } from "../types.js"
 import { handleChat, type ChatDeps } from "./chat.js"
 import { buildSessionKey } from "../session.js"
+import { tryResolvePendingQuestionText } from "./pending-questions.js"
 
 /** 单条待处理消息及其运行依赖。 */
 interface QueuedMessage {
@@ -59,6 +60,19 @@ function cleanupStateIfIdle(sessionKey: string, state: QueueState): void {
  * - 需要回复的消息则按 sessionKey 归并到串行队列
  */
 export async function enqueueMessage(ctx: FeishuMessageContext, deps: ChatDeps): Promise<void> {
+  if (
+    ctx.shouldReply &&
+    ctx.messageType === "text" &&
+    deps.interactiveDeps &&
+    await tryResolvePendingQuestionText({
+      chatId: ctx.chatId,
+      content: ctx.content,
+      deps: deps.interactiveDeps,
+    })
+  ) {
+    return
+  }
+
   // 静默消息只做上下文同步，不需要排队等待 UI 回复链路。
   if (!ctx.shouldReply) {
     await handleChat(ctx, deps)
