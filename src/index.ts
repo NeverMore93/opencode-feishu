@@ -85,9 +85,9 @@ const feishuRuntimePrompt = loadFeishuRuntimePrompt()
  * 插件宿主可能使用动态端口启动 OpenCode server；这里必须使用 ctx.serverUrl，
  * 否则 abort_reply 等后台回调会退回 SDK 默认地址并在动态端口下失败。
  */
-export function buildV2ClientConfig(input: { serverUrl: URL; directory: string }): NonNullable<Parameters<typeof createOpencodeClient>[0]> {
+export function buildV2ClientConfig(input: { serverUrl?: URL; directory: string }): NonNullable<Parameters<typeof createOpencodeClient>[0]> {
   return {
-    baseUrl: input.serverUrl.toString(),
+    baseUrl: input.serverUrl?.toString(),
     directory: input.directory || undefined,
   }
 }
